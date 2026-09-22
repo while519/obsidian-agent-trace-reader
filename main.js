@@ -1,49 +1,1368 @@
-const {Plugin,ItemView,TextFileView,PluginSettingTab,Setting,TFile,MarkdownRenderer,Notice,setIcon}=require("obsidian");
-const fs=require("fs"),path=require("path"),os=require("os");
-const VS="agent-trace-sessions",VT="agent-trace-view",VJ="agent-trace-json",EXT=["json","jsonl","ndjson"],SMART=300,MDMAX=250000,JLIM=1000;
-const DEF={codexSessionsPath:path.join(os.homedir(),".codex","sessions"),maxSessions:300,compactConversation:true};
-class P extends Plugin{
- async onload(){this.settings={...DEF,...((await this.loadData())||{})};this.registerView(VS,l=>new Sessions(l,this));this.registerView(VT,l=>new Trace(l,this));this.registerView(VJ,l=>new JsonView(l));this.registerExtensions(EXT,VJ);this.addRibbonIcon("messages-square","Agent trace sessions",()=>this.openSessions());this.addCommand({id:"open-agent-trace-sessions",name:"Open agent trace sessions",callback:()=>this.openSessions()});this.addSettingTab(new Settings(this.app,this))}
- async save(){await this.saveData(this.settings)}
- async openSessions(){let l=this.app.workspace.getLeavesOfType(VS)[0]||this.app.workspace.getLeaf("tab");await l.setViewState({type:VS,active:true});this.app.workspace.revealLeaf(l)}
- async openTrace(filePath){const l=this.app.workspace.getLeaf("tab");await l.setViewState({type:VT,active:true,state:{filePath}});this.app.workspace.revealLeaf(l)}
-}
-module.exports=P;
-class Settings extends PluginSettingTab{
- constructor(app,p){super(app,p);this.p=p}
- display(){const e=this.containerEl;e.empty();e.createEl("h2",{text:"Agent Trace Reader"});
- new Setting(e).setName("Codex sessions folder").setDesc("Default: ~/.codex/sessions. Read-only; nothing is copied into the vault.").addText(t=>t.setValue(this.p.settings.codexSessionsPath).onChange(async v=>{this.p.settings.codexSessionsPath=home(v.trim());await this.p.save()}));
- new Setting(e).setName("Maximum sessions").addText(t=>t.setValue(String(this.p.settings.maxSessions)).onChange(async v=>{const n=parseInt(v,10);if(n>0){this.p.settings.maxSessions=Math.min(n,5000);await this.p.save()}}));
- new Setting(e).setName("Compact conversation").setDesc("Collapse system/tool/reasoning traffic into Process blocks.").addToggle(t=>t.setValue(this.p.settings.compactConversation).onChange(async v=>{this.p.settings.compactConversation=v;await this.p.save()}))}
-}
-class Sessions extends ItemView{
- constructor(l,p){super(l);this.p=p}getViewType(){return VS}getDisplayText(){return"Agent sessions"}getIcon(){return"messages-square"}async onOpen(){await this.render()}
- async render(){const r=this.contentEl;r.empty();r.addClass("atr-sessions");const h=r.createDiv({cls:"atr-header"}),x=h.createDiv();x.createEl("h2",{text:"Agent Sessions"});x.createDiv({cls:"atr-muted",text:"Codex · local, read-only"});const b=btn(h,"refresh-cw","Refresh");b.onclick=()=>this.render();const root=home(this.p.settings.codexSessionsPath);r.createDiv({cls:"atr-source",text:root});if(!dir(root)){r.createDiv({cls:"atr-empty-card",text:"Codex sessions folder not found. Set it in Settings → Agent Trace Reader."});return}let ss;try{ss=scan(root,this.p.settings.maxSessions)}catch(e){r.createDiv({cls:"atr-error",text:"Scan failed: "+err(e)});return}if(!ss.length){r.createDiv({cls:"atr-empty-card",text:"No rollout-*.jsonl files found."});return}for(const [label,items] of groups(ss)){const sec=r.createDiv({cls:"atr-session-section"});sec.createEl("h3",{text:label});for(const s of items){const c=sec.createEl("button",{cls:"atr-session-card",attr:{type:"button"}}),title=s.title||basename(s.cwd)||s.fileName;c.createDiv({cls:"atr-session-title",text:title});const m=c.createDiv({cls:"atr-session-meta"});m.createSpan({text:fmt(s.modifiedMs)});if(s.cwd)m.createSpan({text:s.cwd});if(s.sessionId)m.createSpan({text:short(s.sessionId)});c.onclick=()=>this.p.openTrace(s.filePath)}}}
-}
-class Trace extends ItemView{
- constructor(l,p){super(l);this.p=p;this.filePath="";this.tab="conversation";this.raw="";this.parsed=null}getViewType(){return VT}getDisplayText(){return this.parsed?.title||basename(this.filePath)||"Agent trace"}getIcon(){return"messages-square"}
- async setState(s,res){await super.setState(s,res);this.filePath=s&&typeof s.filePath==="string"?s.filePath:"";await this.load()}getState(){return{filePath:this.filePath}}async onOpen(){if(this.filePath)await this.load()}
- async load(){try{this.raw=fs.readFileSync(this.filePath,"utf8");this.parsed=parseTrace(this.raw);this.render()}catch(e){this.contentEl.empty();this.contentEl.createDiv({cls:"atr-error",text:"Could not read trace: "+err(e)})}}
- render(){const r=this.contentEl;r.empty();r.addClass("atr-trace");const p=this.parsed;if(!p)return;const h=r.createDiv({cls:"atr-trace-header"}),left=h.createDiv({cls:"atr-trace-heading"});left.createEl("h2",{text:p.title||basename(this.filePath)});const meta=left.createDiv({cls:"atr-trace-meta"});if(p.cwd)meta.createSpan({text:p.cwd});if(p.sessionId)meta.createSpan({text:short(p.sessionId)});const tabs=h.createDiv({cls:"atr-tabs"});for(const t of["conversation","trajectory","raw"]){const b=tabs.createEl("button",{cls:"atr-tab"+(this.tab===t?" is-active":""),text:cap(t)});b.onclick=()=>{this.tab=t;this.render()}}if(p.errors.length)r.createDiv({cls:"atr-warning",text:p.errors.length+" malformed JSONL line(s); Raw remains available."});const body=r.createDiv({cls:"atr-trace-body"});if(this.tab==="conversation")this.convo(body,p.events);else if(this.tab==="trajectory")this.traj(body,p.events);else rawView(body,this.raw)}
- convo(parent,events){const use=events.filter(e=>["user","assistant","system","tool-call","tool-result","reasoning"].includes(e.kind));if(!use.length){parent.createDiv({cls:"atr-empty-card",text:"No conversation events recognized. Use Trajectory or Raw."});return}let proc=[];const flush=()=>{if(!proc.length)return;const d=parent.createEl("details",{cls:"atr-process"});if(!this.p.settings.compactConversation)d.open=true;d.createEl("summary",{text:`Process · ${proc.length} event${proc.length===1?"":"s"}`});proc.forEach(e=>card(d,e,this));proc=[]};for(const e of use){if(e.kind==="user"||e.kind==="assistant"){flush();card(parent,e,this)}else proc.push(e)}flush()}
- traj(parent,events){for(const e of events){const d=parent.createEl("details",{cls:"atr-trajectory-row atr-kind-"+e.kind}),s=d.createEl("summary");s.createSpan({cls:"atr-event-index",text:String(e.index+1).padStart(3,"0")});s.createSpan({cls:"atr-event-time",text:e.timestamp?time(e.timestamp):"—"});s.createSpan({cls:"atr-event-kind",text:e.kind});s.createSpan({cls:"atr-event-title",text:e.title});const c=d.createDiv({cls:"atr-event-details"});if(e.content)smart(c,e.content,this);jsonTree(c,e.raw,"raw",this)}}}
-class JsonView extends TextFileView{
- getViewType(){return VJ}getDisplayText(){return this.file?.basename||"JSON viewer"}getIcon(){return"braces"}setViewData(d){this.data=d;this.render()}getViewData(){return this.data}clear(){this.data="";this.contentEl.empty()}
- render(){const r=this.contentEl;r.empty();r.addClass("atr-json");const h=r.createDiv({cls:"atr-header"});h.createEl("h2",{text:this.file?.name||"JSON"});const ext=this.file?.extension?.toLowerCase()||"json";if(ext==="jsonl"||ext==="ndjson"){const ls=this.data.split(/\r?\n/).filter(x=>x.trim());ls.slice(0,JLIM).forEach((line,i)=>{const d=r.createEl("details",{cls:"atr-json-record"});d.createEl("summary",{text:"line "+(i+1)});try{jsonTree(d,JSON.parse(line),"root",this)}catch{d.createEl("pre",{text:line})}});if(ls.length>JLIM)r.createDiv({cls:"atr-warning",text:(ls.length-JLIM)+" records hidden for performance."});return}try{jsonTree(r,JSON.parse(this.data),"root",this)}catch(e){r.createDiv({cls:"atr-error",text:"JSON parse error: "+err(e)});r.createEl("pre",{text:this.data})}}
-}
-function card(p,e,comp){const c=p.createDiv({cls:"atr-message atr-message-"+e.kind}),h=c.createDiv({cls:"atr-message-header"});h.createSpan({cls:"atr-message-role",text:(e.role||e.kind).toUpperCase()});if(e.timestamp)h.createSpan({cls:"atr-message-time",text:time(e.timestamp)});if(e.content){const b=c.createDiv({cls:"atr-message-body"});messageBody(b,e.content,comp)}else c.createDiv({cls:"atr-muted",text:e.title})}
-function messageBody(p,v,comp){if(v.length<=MDMAX&&looksMd(v)){MarkdownRenderer.render(comp.app,v,p,"",comp).catch(()=>{p.empty();p.createDiv({cls:"atr-message-text",text:v})})}else p.createDiv({cls:"atr-message-text",text:v})}
-function smart(p,v,comp){const d=p.createEl("details",{cls:"atr-smart-string"}),s=d.createEl("summary");s.createSpan({text:v.length.toLocaleString()+" chars"});const bar=d.createDiv({cls:"atr-smart-tabs"}),out=d.createDiv({cls:"atr-smart-content"}),j=tryJson(v),md=v.length<=MDMAX&&looksMd(v),modes=[...(md?["Rendered"]:[]),"Text","Raw",...(j!==null?["JSON"]:[])];let active=md?"Rendered":"Text",rendered=false;const render=m=>{active=m;rendered=true;bar.querySelectorAll("button").forEach(b=>b.toggleClass("is-active",b.textContent===m));out.empty();if(m==="Rendered"){MarkdownRenderer.render(comp.app,v,out,"",comp).catch(()=>{out.empty();out.createEl("pre",{cls:"atr-plain-text",text:v})})}else if(m==="Text")out.createEl("pre",{cls:"atr-plain-text",text:v});else if(m==="Raw")out.createEl("pre",{cls:"atr-plain-text",text:JSON.stringify(v)});else jsonTree(out,j,"root",comp)};for(const m of modes){const b=bar.createEl("button",{cls:"atr-mini-tab",text:m});b.onclick=e=>{e.preventDefault();e.stopPropagation();render(m)}}d.addEventListener("toggle",()=>{if(d.open&&!rendered)render(active)})}
-function jsonTree(p,v,label,comp){if(Array.isArray(v)){const d=p.createEl("details",{cls:"atr-json-branch",attr:{open:""}});d.createEl("summary",{text:`${label}  [${v.length}]`});v.forEach((x,i)=>jsonTree(d,x,"["+i+"]",comp));return}if(obj(v)){const es=Object.entries(v),d=p.createEl("details",{cls:"atr-json-branch",attr:{open:""}});d.createEl("summary",{text:`${label}  {${es.length}}`});es.forEach(([k,x])=>jsonTree(d,x,k,comp));return}const row=p.createDiv({cls:"atr-json-leaf"});row.createSpan({cls:"atr-json-key",text:label});row.createSpan({cls:"atr-json-type",text:v===null?"null":typeof v});if(typeof v==="string"&&(v.length>=SMART||/\r?\n/.test(v))){const b=row.createDiv({cls:"atr-json-smart"});smart(b,v,comp)}else row.createSpan({cls:"atr-json-value",text:typeof v==="string"?v:JSON.stringify(v)})}
-function parseTrace(raw){const events=[],errors=[];let sessionId,cwd,createdAt,title;raw.split(/\r?\n/).forEach((line,i)=>{if(!line.trim())return;let r;try{r=JSON.parse(line)}catch(e){errors.push({line:i+1,message:err(e)});return}const e=norm(r,events.length);events.push(e);if(r.type==="session_meta"&&obj(r.payload)){sessionId=str(r.payload.id)||sessionId;cwd=str(r.payload.cwd)||cwd;createdAt=str(r.timestamp)||str(r.payload.timestamp)||createdAt;title=str(r.payload.title)||title}if(!title&&e.kind==="user"&&e.content)title=titleOf(e.content)});return{events:dedupeMessages(events),errors,sessionId,cwd,createdAt,title}}
-function norm(r,index){if(!obj(r))return{index,sourceType:"unknown",kind:"unknown",title:"Unknown",raw:r};const ts=str(r.timestamp),st=str(r.type)||"unknown",p=obj(r.payload)?r.payload:null;if(st==="session_meta")return{index,timestamp:ts,sourceType:st,kind:"metadata",title:"Session metadata",raw:r};if(st==="turn_context")return{index,timestamp:ts,sourceType:st,kind:"metadata",title:"Turn context",raw:r};if(st==="response_item"&&p)return resp(r,p,index,ts,st);if(st==="event_msg"&&p){const pt=str(p.type)||"event",text=extract(p);if(pt==="user_message")return{index,timestamp:ts,sourceType:st,kind:"user",role:"user",title:"User",content:text,raw:r};if(/reason|analysis/i.test(pt))return{index,timestamp:ts,sourceType:st,kind:"reasoning",title:pt,content:text,raw:r};return{index,timestamp:ts,sourceType:st,kind:"event",title:pt,content:text,raw:r}}return{index,timestamp:ts,sourceType:st,kind:"unknown",title:st,content:extract(r),raw:r}}
-function resp(r,p,index,ts,st){const type=str(p.type)||"response_item",role=str(p.role),text=extract(p);if(type==="message"){const kind=role==="user"?"user":role==="assistant"?"assistant":role==="system"||role==="developer"?"system":"event";return{index,timestamp:ts,sourceType:st,kind,role,title:cap(role||"message"),content:text,raw:r}}if(/function_call_output|tool_output|custom_tool_call_output/i.test(type))return{index,timestamp:ts,sourceType:st,kind:"tool-result",title:str(p.name)||str(p.call_id)||"Tool result",content:text||str(p.output),raw:r};if(/function_call|tool_call|custom_tool_call/i.test(type)){const a=p.arguments??p.input??p.params;return{index,timestamp:ts,sourceType:st,kind:"tool-call",title:str(p.name)||str(p.tool_name)||"Tool call",content:typeof a==="string"?a:a!==undefined?JSON.stringify(a,null,2):text,raw:r}}if(/reason|analysis/i.test(type))return{index,timestamp:ts,sourceType:st,kind:"reasoning",title:"Reasoning",content:text,raw:r};return{index,timestamp:ts,sourceType:st,kind:"event",title:type,content:text,raw:r}}
-function extract(v){if(typeof v==="string")return v;if(Array.isArray(v)){const a=v.map(extract).filter(Boolean);return a.length?a.join("\n\n"):undefined}if(!obj(v))return;for(const k of["text","message","content","output_text","input_text","output","summary"]){const x=extract(v[k]);if(x)return x}}
-function scan(root,limit){const out=[],stack=[root];while(stack.length){const cur=stack.pop();let es;try{es=fs.readdirSync(cur,{withFileTypes:true})}catch{continue}for(const e of es){const f=path.join(cur,e.name);if(e.isDirectory())stack.push(f);else if(e.isFile()&&e.name.startsWith("rollout-")&&e.name.endsWith(".jsonl")){try{const st=fs.statSync(f);out.push({filePath:f,fileName:e.name,modifiedMs:st.mtimeMs})}catch{}}}}out.sort((a,b)=>b.modifiedMs-a.modifiedMs);return out.slice(0,limit).map(enrich)}
-function enrich(s){try{const fd=fs.openSync(s.filePath,"r"),buf=Buffer.alloc(65536),n=fs.readSync(fd,buf,0,buf.length,0);fs.closeSync(fd);for(const line of buf.toString("utf8",0,n).split(/\r?\n/).slice(0,20)){let r;try{r=JSON.parse(line)}catch{continue}if(r.type==="session_meta"&&obj(r.payload)){s.sessionId=str(r.payload.id)||s.sessionId;s.cwd=str(r.payload.cwd)||s.cwd;s.createdAt=str(r.timestamp)||s.createdAt;s.title=str(r.payload.title)||s.title}const e=norm(r,0);if(!s.title&&e.kind==="user"&&e.content)s.title=titleOf(e.content)}}catch{}return s}
-function groups(ss){const m=new Map;for(const s of ss){const k=day(s.modifiedMs);if(!m.has(k))m.set(k,[]);m.get(k).push(s)}return m}
-function rawView(p,raw){const pre=p.createEl("pre",{cls:"atr-raw"});raw.split(/\r?\n/).forEach((line,i)=>{const r=pre.createDiv({cls:"atr-raw-line"});r.createSpan({cls:"atr-line-number",text:String(i+1)});r.createSpan({cls:"atr-line-content",text:line})})}
-function btn(p,icon,label){const b=p.createEl("button",{cls:"clickable-icon atr-icon-button",attr:{title:label,"aria-label":label}});setIcon(b,icon);return b}
-function obj(v){return v&&typeof v==="object"&&!Array.isArray(v)}function str(v){return typeof v==="string"?v:undefined}function err(e){return e instanceof Error?e.message:String(e)}function home(v){return v==="~"?os.homedir():v.startsWith("~/")?path.join(os.homedir(),v.slice(2)):v}function dir(v){try{return fs.statSync(v).isDirectory()}catch{return false}}function basename(v){return v?path.basename(v):""}function short(v){return v.length>12?v.slice(0,8)+"…"+v.slice(-4):v}function cap(v){return v? v[0].toUpperCase()+v.slice(1):v}function titleOf(v){return v.replace(/\s+/g," ").trim().slice(0,80)||"Untitled session"}function fmt(ms){return new Date(ms).toLocaleString(undefined,{month:"short",day:"numeric",hour:"2-digit",minute:"2-digit"})}function time(v){const d=new Date(v);return isNaN(d)?String(v).slice(0,8):d.toLocaleTimeString(undefined,{hour:"2-digit",minute:"2-digit",second:"2-digit"})}function day(ms){const n=new Date(),t=new Date(ms),a=new Date(n.getFullYear(),n.getMonth(),n.getDate()).getTime(),b=new Date(t.getFullYear(),t.getMonth(),t.getDate()).getTime(),d=Math.round((a-b)/86400000);return d===0?"Today":d===1?"Yesterday":d<7?"Earlier this week":t.toLocaleDateString(undefined,{year:"numeric",month:"long"})}function looksMd(v){return /(^|\n)#{1,6}\s|(^|\n)\s*[-*+]\s|\`\`\`|\[[^\]]+\]\([^\)]+\)|(^|\n)>\s/m.test(v)}function tryJson(v){const s=v.trim();if(!(s.startsWith("{")||s.startsWith("[")))return null;try{return JSON.parse(s)}catch{return null}}
+const {
+  Plugin,
+  ItemView,
+  TextFileView,
+  PluginSettingTab,
+  Setting,
+  MarkdownRenderer,
+  Notice,
+  setIcon,
+} = require("obsidian");
+const fs = require("fs");
+const path = require("path");
+const os = require("os");
 
-function dedupeMessages(events){const out=[];for(const e of events){if((e.kind==="user"||e.kind==="assistant")&&e.content){let dup=false;for(let i=out.length-1;i>=0;i--){const p=out[i];if(p.kind==="assistant"&&e.kind==="user")break;if(p.kind==="user"&&e.kind==="assistant")break;if(p.kind===e.kind&&p.content===e.content){dup=true;break}}if(dup)continue}out.push(e)}return out}
+const VS = "agent-trace-sessions";
+const VT = "agent-trace-view";
+const VJ = "agent-trace-json";
+const EXT = ["json", "jsonl", "ndjson"];
+const SMART = 300;
+const MDMAX = 250000;
+const JLIM = 1000;
+const TRACE_LARGE_BYTES = 16 * 1024 * 1024;
+const RAW_PAGE_SIZE = 200;
+const PROCESS_PAGE_SIZE = 200;
+const PREVIEW_CHARS = 180;
+const TITLE_SCAN_RECORDS = 120;
+const DEF = {
+  codexSessionsPath: path.join(os.homedir(), ".codex", "sessions"),
+  maxSessions: 300,
+  compactConversation: true,
+};
+
+class P extends Plugin {
+  async onload() {
+    this.settings = { ...DEF, ...((await this.loadData()) || {}) };
+    this.registerView(VS, (leaf) => new Sessions(leaf, this));
+    this.registerView(VT, (leaf) => new Trace(leaf, this));
+    this.registerView(VJ, (leaf) => new JsonView(leaf));
+    this.registerExtensions(EXT, VJ);
+    this.addRibbonIcon("messages-square", "Agent trace sessions", () => this.openSessions());
+    this.addCommand({
+      id: "open-agent-trace-sessions",
+      name: "Open agent trace sessions",
+      callback: () => this.openSessions(),
+    });
+    this.addSettingTab(new Settings(this.app, this));
+  }
+
+  async save() {
+    await this.saveData(this.settings);
+  }
+
+  async openSessions() {
+    const leaf = this.app.workspace.getLeavesOfType(VS)[0] || this.app.workspace.getLeaf("tab");
+    await leaf.setViewState({ type: VS, active: true });
+    this.app.workspace.revealLeaf(leaf);
+  }
+
+  async openTrace(filePath) {
+    const leaf = this.app.workspace.getLeaf("tab");
+    await leaf.setViewState({ type: VT, active: true, state: { filePath } });
+    this.app.workspace.revealLeaf(leaf);
+  }
+}
+
+module.exports = P;
+
+class Settings extends PluginSettingTab {
+  constructor(app, plugin) {
+    super(app, plugin);
+    this.p = plugin;
+  }
+
+  display() {
+    const el = this.containerEl;
+    el.empty();
+    el.createEl("h2", { text: "Agent Trace Reader" });
+
+    new Setting(el)
+      .setName("Codex sessions folder")
+      .setDesc("Default: ~/.codex/sessions. Read-only; nothing is copied into the vault.")
+      .addText((text) =>
+        text
+          .setValue(this.p.settings.codexSessionsPath)
+          .onChange(async (value) => {
+            const next = value.trim();
+            if (!next) return;
+            this.p.settings.codexSessionsPath = home(next);
+            await this.p.save();
+          }),
+      );
+
+    new Setting(el)
+      .setName("Maximum sessions")
+      .setDesc("Limit the number of sessions shown after scanning the folder.")
+      .addText((text) =>
+        text.setValue(String(this.p.settings.maxSessions)).onChange(async (value) => {
+          const next = parseInt(value, 10);
+          if (next > 0) {
+            this.p.settings.maxSessions = Math.min(next, 5000);
+            await this.p.save();
+          }
+        }),
+      );
+
+    new Setting(el)
+      .setName("Compact conversation")
+      .setDesc("Collapse system/tool/reasoning traffic into Process blocks.")
+      .addToggle((toggle) =>
+        toggle.setValue(this.p.settings.compactConversation).onChange(async (value) => {
+          this.p.settings.compactConversation = value;
+          await this.p.save();
+        }),
+      );
+  }
+}
+
+class Sessions extends ItemView {
+  constructor(leaf, plugin) {
+    super(leaf);
+    this.p = plugin;
+  }
+
+  getViewType() {
+    return VS;
+  }
+
+  getDisplayText() {
+    return "Agent sessions";
+  }
+
+  getIcon() {
+    return "messages-square";
+  }
+
+  async onOpen() {
+    await this.render();
+  }
+
+  async render() {
+    const rootEl = this.contentEl;
+    rootEl.empty();
+    rootEl.addClass("atr-sessions");
+
+    const header = rootEl.createDiv({ cls: "atr-header" });
+    const heading = header.createDiv();
+    heading.createEl("h2", { text: "Agent Sessions" });
+    heading.createDiv({ cls: "atr-muted", text: "Codex · local, read-only" });
+    const refresh = btn(header, "refresh-cw", "Refresh");
+    refresh.onclick = () => this.render();
+
+    const root = home(this.p.settings.codexSessionsPath);
+    const source = rootEl.createDiv({ cls: "atr-source" });
+    source.createSpan({ text: root });
+    copyButton(source, "Copy sessions folder", () => root, { text: "Copy path" });
+    if (!dir(root)) {
+      rootEl.createDiv({
+        cls: "atr-empty-card",
+        text: "Codex sessions folder not found. Set it in Settings → Agent Trace Reader.",
+      });
+      return;
+    }
+
+    let sessions;
+    try {
+      sessions = await scan(root, this.p.settings.maxSessions);
+    } catch (error) {
+      rootEl.createDiv({ cls: "atr-error", text: `Scan failed: ${err(error)}` });
+      return;
+    }
+
+    if (!sessions.length) {
+      rootEl.createDiv({ cls: "atr-empty-card", text: "No rollout-*.jsonl files found." });
+      return;
+    }
+
+    const titleCounts = new Map();
+    for (const session of sessions) {
+      const title = session.title || "Untitled session";
+      titleCounts.set(title, (titleCounts.get(title) || 0) + 1);
+    }
+
+    let sectionIndex = 0;
+    for (const [label, items] of groups(sessions)) {
+      const sectionClass = `atr-session-section atr-session-section-${label.toLowerCase()}${sectionIndex === 0 ? " atr-session-section-first" : ""}`;
+      const section = rootEl.createDiv({ cls: sectionClass });
+      const sectionHeader = section.createDiv({ cls: "atr-session-section-header" });
+      sectionHeader.createEl("h3", { text: label });
+      sectionHeader.createSpan({
+        cls: "atr-session-count",
+        text: `${items.length.toLocaleString()} session${items.length === 1 ? "" : "s"}`,
+      });
+      for (const session of items) {
+        const row = section.createDiv({ cls: "atr-session-row" });
+        const cardEl = row.createEl("button", {
+          cls: "atr-session-card",
+          attr: { type: "button" },
+        });
+        const title = displaySessionTitle(session, titleCounts);
+        cardEl.createDiv({ cls: "atr-session-title", text: title });
+        const meta = cardEl.createDiv({ cls: "atr-session-meta" });
+        meta.createSpan({ cls: "atr-session-date", text: fmt(session.modifiedMs) });
+        if (session.cwd) meta.createSpan({ cls: "atr-session-cwd", text: session.cwd });
+        if (session.sessionId) meta.createSpan({ cls: "atr-session-id", text: short(session.sessionId) });
+        cardEl.onclick = () => this.p.openTrace(session.filePath);
+        copyButton(row, "Copy trace path", () => session.filePath);
+      }
+      sectionIndex += 1;
+    }
+  }
+}
+
+class Trace extends ItemView {
+  constructor(leaf, plugin) {
+    super(leaf);
+    this.p = plugin;
+    this.filePath = "";
+    this.tab = "conversation";
+    this.trace = null;
+    this.loadSerial = 0;
+  }
+
+  getViewType() {
+    return VT;
+  }
+
+  getDisplayText() {
+    return this.trace?.title || basename(this.filePath) || "Agent trace";
+  }
+
+  getIcon() {
+    return "messages-square";
+  }
+
+  async setState(state, result) {
+    await super.setState(state, result);
+    this.filePath = state && typeof state.filePath === "string" ? state.filePath : "";
+    await this.load();
+  }
+
+  getState() {
+    return { filePath: this.filePath };
+  }
+
+  async onOpen() {
+    if (this.filePath) await this.load();
+  }
+
+  async load() {
+    const serial = ++this.loadSerial;
+    this.contentEl.empty();
+    this.contentEl.addClass("atr-trace");
+    this.contentEl.createDiv({ cls: "atr-loading", text: "Loading trace…" });
+
+    try {
+      const trace = await parseTraceFile(this.filePath);
+      if (serial !== this.loadSerial) return;
+      this.trace = trace;
+      this.render();
+    } catch (error) {
+      if (serial !== this.loadSerial) return;
+      this.trace = null;
+      this.contentEl.empty();
+      this.contentEl.addClass("atr-trace");
+      this.contentEl.createDiv({ cls: "atr-error", text: `Could not read trace: ${err(error)}` });
+    }
+  }
+
+  render() {
+    const rootEl = this.contentEl;
+    rootEl.empty();
+    rootEl.addClass("atr-trace");
+    const trace = this.trace;
+    if (!trace) return;
+
+    const header = rootEl.createDiv({ cls: "atr-trace-header" });
+    const heading = header.createDiv({ cls: "atr-trace-heading" });
+    heading.createEl("h2", { text: trace.title || basename(this.filePath) });
+    const meta = heading.createDiv({ cls: "atr-trace-meta" });
+    if (trace.cwd) meta.createSpan({ text: trace.cwd });
+    if (trace.sessionId) meta.createSpan({ text: short(trace.sessionId) });
+    meta.createSpan({ text: `${trace.lineCount.toLocaleString()} lines` });
+    if (trace.isLarge) meta.createSpan({ text: `${formatBytes(trace.fileSize)} · streamed` });
+    copyButton(meta, "Copy trace path", () => this.filePath);
+
+    const tabs = header.createDiv({ cls: "atr-tabs" });
+    for (const tab of ["conversation", "trajectory", "raw"]) {
+      const tabEl = tabs.createEl("button", {
+        cls: `atr-tab${this.tab === tab ? " is-active" : ""}`,
+        text: cap(tab),
+      });
+      tabEl.onclick = () => {
+        this.tab = tab;
+        this.render();
+      };
+    }
+
+    if (trace.errors.length) {
+      rootEl.createDiv({
+        cls: "atr-warning",
+        text: `${trace.errors.length} malformed JSONL line(s); Raw remains available.`,
+      });
+    }
+    if (trace.isLarge) {
+      rootEl.createDiv({
+        cls: "atr-note",
+        text: "Large trace: records and raw evidence load in pages; expanding an event reads only that line.",
+      });
+    }
+
+    const body = rootEl.createDiv({ cls: "atr-trace-body" });
+    if (this.tab === "conversation") this.convo(body, trace.events);
+    else if (this.tab === "trajectory") this.traj(body, trace.events);
+    else rawView(body, trace);
+  }
+
+  convo(parent, events) {
+    const use = conversationEvents(events);
+    if (!use.length) {
+      parent.createDiv({
+        cls: "atr-empty-card",
+        text: "No conversation events recognized. Use Trajectory or Raw.",
+      });
+      return;
+    }
+
+    let process = [];
+    const flush = () => {
+      if (!process.length) return;
+      processBlock(parent, process, this, this.p.settings.compactConversation);
+      process = [];
+    };
+
+    for (const event of use) {
+      if (event.kind === "user" || event.kind === "assistant") {
+        flush();
+        card(parent, event, this);
+      } else {
+        process.push(event);
+      }
+    }
+    flush();
+  }
+
+  traj(parent, events) {
+    const list = parent.createDiv({ cls: "atr-event-list" });
+    let cursor = 0;
+    const more = parent.createEl("button", {
+      cls: "atr-load-more",
+      attr: { type: "button" },
+    });
+
+    const updateMore = () => {
+      const remaining = events.length - cursor;
+      if (!remaining) {
+        more.remove();
+        return;
+      }
+      more.textContent = `Load next ${Math.min(PROCESS_PAGE_SIZE, remaining).toLocaleString()} events · ${remaining.toLocaleString()} remaining`;
+    };
+
+    const renderNext = () => {
+      const end = Math.min(cursor + PROCESS_PAGE_SIZE, events.length);
+      for (; cursor < end; cursor += 1) eventRow(list, events[cursor], this);
+      updateMore();
+    };
+
+    more.onclick = renderNext;
+    renderNext();
+  }
+}
+
+class JsonView extends TextFileView {
+  getViewType() {
+    return VJ;
+  }
+
+  getDisplayText() {
+    return this.file?.basename || "JSON viewer";
+  }
+
+  getIcon() {
+    return "braces";
+  }
+
+  setViewData(data) {
+    this.data = data;
+    this.render();
+  }
+
+  getViewData() {
+    return this.data;
+  }
+
+  clear() {
+    this.data = "";
+    this.contentEl.empty();
+  }
+
+  render() {
+    const rootEl = this.contentEl;
+    rootEl.empty();
+    rootEl.addClass("atr-json");
+    const header = rootEl.createDiv({ cls: "atr-header" });
+    header.createEl("h2", { text: this.file?.name || "JSON" });
+    copyButton(header, "Copy JSON", () => this.data, { text: "Copy" });
+    const extension = this.file?.extension?.toLowerCase() || "json";
+
+    if (extension === "jsonl" || extension === "ndjson") {
+      const lines = this.data.split(/\r?\n/).filter((line) => line.trim());
+      lines.slice(0, JLIM).forEach((line, index) => {
+        const record = rootEl.createEl("details", { cls: "atr-json-record" });
+        const summary = record.createEl("summary");
+        summary.createSpan({ text: `line ${index + 1}` });
+        copyButton(summary, "Copy record", () => line);
+        try {
+          jsonTree(record, JSON.parse(line), "root", this);
+        } catch {
+          record.createEl("pre", { text: line });
+        }
+      });
+      if (lines.length > JLIM) {
+        rootEl.createDiv({
+          cls: "atr-warning",
+          text: `${(lines.length - JLIM).toLocaleString()} records hidden for performance.`,
+        });
+      }
+      return;
+    }
+
+    try {
+      jsonTree(rootEl, JSON.parse(this.data), "root", this);
+    } catch (error) {
+      rootEl.createDiv({ cls: "atr-error", text: `JSON parse error: ${err(error)}` });
+      rootEl.createEl("pre", { text: this.data });
+    }
+  }
+}
+
+function processBlock(parent, events, comp, compact) {
+  const details = parent.createEl("details", { cls: "atr-process" });
+  if (!compact) details.open = true;
+  const summary = details.createEl("summary");
+  summary.createSpan({
+    cls: "atr-process-label",
+    text: `Process · ${events.length.toLocaleString()} event${events.length === 1 ? "" : "s"}`,
+  });
+  copyButton(summary, "Copy process", () => copyEventCollection(events));
+
+  let cursor = 0;
+  let body;
+  let more;
+  const renderNext = () => {
+    if (!body) body = details.createDiv({ cls: "atr-process-events" });
+    const end = Math.min(cursor + PROCESS_PAGE_SIZE, events.length);
+    for (; cursor < end; cursor += 1) card(body, events[cursor], comp);
+    if (cursor < events.length) {
+      if (!more) {
+        more = body.createEl("button", {
+          cls: "atr-load-more",
+          attr: { type: "button" },
+        });
+        more.onclick = renderNext;
+      }
+      const remaining = events.length - cursor;
+      more.textContent = `Load next ${Math.min(PROCESS_PAGE_SIZE, remaining).toLocaleString()} process events · ${remaining.toLocaleString()} remaining`;
+    } else if (more) {
+      more.remove();
+    }
+  };
+
+  details.addEventListener("toggle", () => {
+    if (details.open && cursor === 0) renderNext();
+  });
+  if (!compact) renderNext();
+}
+
+function card(parent, event, comp) {
+  const cardEl = parent.createDiv({ cls: `atr-message atr-message-${event.kind}` });
+  const header = cardEl.createDiv({ cls: "atr-message-header" });
+  const headerMain = header.createDiv({ cls: "atr-message-header-main" });
+  headerMain.createSpan({ cls: "atr-message-role", text: (event.role || event.kind).toUpperCase() });
+  if (event.timestamp) headerMain.createSpan({ cls: "atr-message-time", text: time(event.timestamp) });
+  copyButton(header, "Copy message", () => eventCopyText(event));
+
+  if (event.content !== undefined) {
+    const body = cardEl.createDiv({ cls: "atr-message-body" });
+    messageBody(body, event.content, comp);
+  } else if (event.hasContent) {
+    lazyMessageBody(cardEl, event, comp);
+  } else {
+    cardEl.createDiv({ cls: "atr-muted", text: event.title });
+  }
+}
+
+function lazyMessageBody(parent, event, comp) {
+  const details = parent.createEl("details", { cls: "atr-lazy-content" });
+  const summary = details.createEl("summary");
+  summary.createSpan({ text: `${formatChars(event.contentLength)} · Expand to load` });
+  if (event.preview) summary.createSpan({ cls: "atr-lazy-preview", text: ` · ${event.preview}` });
+  const body = details.createDiv({ cls: "atr-message-body" });
+  let loaded = false;
+
+  details.addEventListener("toggle", () => {
+    if (!details.open || loaded) return;
+    loaded = true;
+    try {
+      const hydrated = hydrateEvent(event);
+      if (hydrated && hydrated.content !== undefined) {
+        messageBody(body, hydrated.content, comp);
+      } else {
+        body.createDiv({ cls: "atr-muted", text: "No displayable text in this event." });
+      }
+    } catch (error) {
+      body.createDiv({ cls: "atr-error", text: `Could not load event: ${err(error)}` });
+    }
+  });
+}
+
+function messageBody(parent, value, comp) {
+  if (value.length <= MDMAX && looksMd(value)) {
+    MarkdownRenderer.render(comp.app, value, parent, "", comp).catch(() => {
+      parent.empty();
+      parent.createDiv({ cls: "atr-message-text", text: value });
+    });
+  } else {
+    parent.createDiv({ cls: "atr-message-text", text: value });
+  }
+}
+
+function eventRow(parent, event, comp) {
+  const details = parent.createEl("details", { cls: `atr-trajectory-row atr-kind-${event.kind}` });
+  const summary = details.createEl("summary");
+  summary.createSpan({ cls: "atr-event-index", text: String(event.index + 1).padStart(3, "0") });
+  summary.createSpan({ cls: "atr-event-time", text: event.timestamp ? time(event.timestamp) : "—" });
+  summary.createSpan({ cls: "atr-event-kind", text: event.kind });
+  const title = event.hasContent && event.content === undefined
+    ? `${event.title} · ${formatChars(event.contentLength)}`
+    : event.title;
+  summary.createSpan({ cls: "atr-event-title", text: title });
+  const copy = copyButton(summary, "Copy event", () => eventCopyText(event));
+  copy.addClass("atr-event-copy");
+  const content = details.createDiv({ cls: "atr-event-details" });
+  let loaded = false;
+  details.addEventListener("toggle", () => {
+    if (!details.open || loaded) return;
+    loaded = true;
+    renderEventDetails(content, event, comp);
+  });
+}
+
+function renderEventDetails(parent, event, comp) {
+  try {
+    const hydrated = hydrateEvent(event);
+    if (!hydrated) {
+      parent.createDiv({ cls: "atr-muted", text: "Event record is unavailable." });
+      return;
+    }
+    if (hydrated.content !== undefined) smart(parent, hydrated.content, comp);
+    if (hydrated.raw !== undefined) jsonTree(parent, hydrated.raw, "raw", comp);
+  } catch (error) {
+    parent.createDiv({ cls: "atr-error", text: `Could not load event: ${err(error)}` });
+  }
+}
+
+function smart(parent, value, comp) {
+  const details = parent.createEl("details", { cls: "atr-smart-string" });
+  const summary = details.createEl("summary");
+  summary.createSpan({ text: `${value.length.toLocaleString()} chars` });
+  const bar = details.createDiv({ cls: "atr-smart-tabs" });
+  const output = details.createDiv({ cls: "atr-smart-content" });
+  const parsed = tryJson(value);
+  const markdown = value.length <= MDMAX && looksMd(value);
+  const modes = [...(markdown ? ["Rendered"] : []), "Text", "Raw", ...(parsed !== null ? ["JSON"] : [])];
+  let active = markdown ? "Rendered" : "Text";
+  let rendered = false;
+
+  const render = (mode) => {
+    active = mode;
+    rendered = true;
+    bar.querySelectorAll("button").forEach((button) => button.toggleClass("is-active", button.textContent === mode));
+    output.empty();
+    if (mode === "Rendered") {
+      MarkdownRenderer.render(comp.app, value, output, "", comp).catch(() => {
+        output.empty();
+        output.createEl("pre", { cls: "atr-plain-text", text: value });
+      });
+    } else if (mode === "Text") {
+      output.createEl("pre", { cls: "atr-plain-text", text: value });
+    } else if (mode === "Raw") {
+      output.createEl("pre", { cls: "atr-plain-text", text: JSON.stringify(value) });
+    } else {
+      jsonTree(output, parsed, "root", comp);
+    }
+  };
+
+  for (const mode of modes) {
+    const button = bar.createEl("button", { cls: "atr-mini-tab", text: mode });
+    button.onclick = (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      render(mode);
+    };
+  }
+  copyButton(bar, "Copy string", () => value);
+  details.addEventListener("toggle", () => {
+    if (details.open && !rendered) render(active);
+  });
+}
+
+function jsonTree(parent, value, label, comp) {
+  if (Array.isArray(value)) {
+    const branch = parent.createEl("details", { cls: "atr-json-branch", attr: { open: "" } });
+    const summary = branch.createEl("summary");
+    summary.createSpan({ text: `${label}  [${value.length}]` });
+    copyButton(summary, "Copy JSON", () => JSON.stringify(value, null, 2));
+    value.forEach((item, index) => jsonTree(branch, item, `[${index}]`, comp));
+    return;
+  }
+  if (obj(value)) {
+    const entries = Object.entries(value);
+    const branch = parent.createEl("details", { cls: "atr-json-branch", attr: { open: "" } });
+    const summary = branch.createEl("summary");
+    summary.createSpan({ text: `${label}  {${entries.length}}` });
+    copyButton(summary, "Copy JSON", () => JSON.stringify(value, null, 2));
+    entries.forEach(([key, item]) => jsonTree(branch, item, key, comp));
+    return;
+  }
+
+  const row = parent.createDiv({ cls: "atr-json-leaf" });
+  row.createSpan({ cls: "atr-json-key", text: label });
+  row.createSpan({ cls: "atr-json-type", text: value === null ? "null" : typeof value });
+  if (typeof value === "string" && (value.length >= SMART || /\r?\n/.test(value))) {
+    const smartEl = row.createDiv({ cls: "atr-json-smart" });
+    smart(smartEl, value, comp);
+  } else {
+    row.createSpan({
+      cls: "atr-json-value",
+      text: typeof value === "string" ? value : JSON.stringify(value),
+    });
+    const copy = copyButton(row, "Copy value", () => jsonValueText(value));
+    copy.addClass("atr-json-copy");
+  }
+}
+
+async function parseTraceFile(filePath) {
+  const stat = fs.statSync(filePath);
+  const large = stat.size > TRACE_LARGE_BYTES;
+  const events = [];
+  const errors = [];
+  const lineRefs = [];
+  const meta = {
+    sessionId: undefined,
+    cwd: undefined,
+    createdAt: undefined,
+    sessionTitle: undefined,
+    firstUser: undefined,
+    preferredUser: undefined,
+    reviewTitle: undefined,
+  };
+
+  for await (const line of jsonlLines(filePath)) {
+    lineRefs.push({ offset: line.offset, length: line.length, filePath });
+    if (!line.text.trim()) continue;
+
+    let record;
+    try {
+      record = JSON.parse(line.text);
+    } catch (error) {
+      errors.push({ line: line.line + 1, message: err(error) });
+      continue;
+    }
+
+    const event = norm(record, events.length, { keepRaw: !large, keepContent: !large });
+    event.lineNumber = line.line + 1;
+    event.ref = { filePath, offset: line.offset, length: line.length };
+    events.push(event);
+    updateMeta(meta, record, event);
+  }
+
+  return finishTrace({
+    events,
+    errors,
+    meta,
+    filePath,
+    fileSize: stat.size,
+    lineRefs,
+    lineCount: lineRefs.length,
+    isLarge: large,
+  });
+}
+
+function parseTrace(raw) {
+  const events = [];
+  const errors = [];
+  const meta = {
+    sessionId: undefined,
+    cwd: undefined,
+    createdAt: undefined,
+    sessionTitle: undefined,
+    firstUser: undefined,
+    preferredUser: undefined,
+    reviewTitle: undefined,
+  };
+  const lineRefs = [];
+
+  raw.split(/\r?\n/).forEach((line, lineNumber) => {
+    lineRefs.push({ offset: null, length: line.length, filePath: null });
+    if (!line.trim()) return;
+
+    let record;
+    try {
+      record = JSON.parse(line);
+    } catch (error) {
+      errors.push({ line: lineNumber + 1, message: err(error) });
+      return;
+    }
+
+    const event = norm(record, events.length, { keepRaw: true, keepContent: true });
+    event.lineNumber = lineNumber + 1;
+    events.push(event);
+    updateMeta(meta, record, event);
+  });
+
+  return finishTrace({
+    events,
+    errors,
+    meta,
+    raw,
+    filePath: null,
+    fileSize: Buffer.byteLength(raw, "utf8"),
+    lineRefs,
+    lineCount: lineRefs.length,
+    isLarge: false,
+  });
+}
+
+function finishTrace({ events, errors, meta, ...rest }) {
+  return {
+    events: dedupeMessages(events),
+    errors,
+    sessionId: meta.sessionId,
+    cwd: meta.cwd,
+    createdAt: meta.createdAt,
+    title: titleOf(meta.sessionTitle || meta.preferredUser || meta.firstUser || meta.reviewTitle || ""),
+    ...rest,
+  };
+}
+
+function updateMeta(meta, record, event) {
+  const payload = obj(record?.payload) ? record.payload : null;
+  if (record?.type === "session_meta" && payload) {
+    meta.sessionId = str(payload.id) || str(payload.session_id) || meta.sessionId;
+    meta.cwd = str(payload.cwd) || meta.cwd;
+    meta.createdAt = str(record.timestamp) || str(payload.timestamp) || meta.createdAt;
+    const sessionTitle = str(payload.title);
+    if (sessionTitle && !isBootstrap(sessionTitle)) meta.sessionTitle = sessionTitle;
+  }
+
+  if (event.kind !== "user" || !event.hasContent) return;
+  const candidate = event.content !== undefined ? event.content : event.preview;
+  if (isBootstrap(candidate)) {
+    if (!meta.reviewTitle) meta.reviewTitle = transcriptTitle(candidate);
+    return;
+  }
+  if (!meta.firstUser) meta.firstUser = candidate;
+  if (isUserMessageEvent(record) && !meta.preferredUser) {
+    meta.preferredUser = candidate;
+  }
+}
+
+function norm(record, index, options = {}) {
+  const keepRaw = options.keepRaw !== false;
+  const keepContent = options.keepContent !== false;
+  if (!obj(record)) {
+    return makeEvent(index, undefined, "unknown", "unknown", "Unknown", undefined, record, { keepRaw, keepContent });
+  }
+
+  const timestamp = str(record.timestamp);
+  const sourceType = str(record.type) || "unknown";
+  const payload = obj(record.payload) ? record.payload : null;
+
+  if (sourceType === "session_meta") {
+    return makeEvent(index, timestamp, sourceType, "metadata", "Session metadata", undefined, record, { keepRaw, keepContent });
+  }
+  if (sourceType === "turn_context") {
+    return makeEvent(index, timestamp, sourceType, "metadata", "Turn context", undefined, record, { keepRaw, keepContent });
+  }
+  if (sourceType === "response_item" && payload) return responseEvent(record, payload, index, timestamp, { keepRaw, keepContent });
+  if (sourceType === "event_msg" && payload) return eventMessage(record, payload, index, timestamp, { keepRaw, keepContent });
+
+  return makeEvent(index, timestamp, sourceType, "unknown", sourceType, extract(record), record, { keepRaw, keepContent });
+}
+
+function responseEvent(record, payload, index, timestamp, options) {
+  const type = str(payload.type) || "response_item";
+  const role = str(payload.role);
+  const text = extract(payload);
+  const normalizedRole = role?.toLowerCase();
+
+  if (type === "message") {
+    const kind = normalizedRole === "user"
+      ? "user"
+      : normalizedRole === "assistant"
+        ? "assistant"
+        : normalizedRole === "system" || normalizedRole === "developer"
+          ? "system"
+          : "event";
+    return makeEvent(index, timestamp, "response_item", kind, cap(role || "message"), text, record, options, { role });
+  }
+  if (/function_call_output|tool_output|custom_tool_call_output/i.test(type)) {
+    return makeEvent(
+      index,
+      timestamp,
+      "response_item",
+      "tool-result",
+      str(payload.name) || str(payload.call_id) || "Tool result",
+      text || str(payload.output),
+      record,
+      options,
+      { sourceSubtype: type },
+    );
+  }
+  if (/function_call|tool_call|custom_tool_call/i.test(type)) {
+    const args = payload.arguments ?? payload.input ?? payload.params;
+    const content = typeof args === "string" ? args : args !== undefined ? JSON.stringify(args, null, 2) : text;
+    return makeEvent(
+      index,
+      timestamp,
+      "response_item",
+      "tool-call",
+      str(payload.name) || str(payload.tool_name) || "Tool call",
+      content,
+      record,
+      options,
+      { sourceSubtype: type },
+    );
+  }
+  if (/reason|analysis/i.test(type)) {
+    return makeEvent(index, timestamp, "response_item", "reasoning", "Reasoning", text, record, options, { sourceSubtype: type });
+  }
+  return makeEvent(index, timestamp, "response_item", "event", type, text, record, options, { sourceSubtype: type });
+}
+
+function eventMessage(record, payload, index, timestamp, options) {
+  const type = str(payload.type) || "event";
+  const item = obj(payload.item) ? payload.item : null;
+  const itemType = str(item?.type);
+  const text = extract(payload) ?? extract(item);
+  const subtype = itemType ? `${type}:${itemType}` : type;
+
+  if (type === "user_message" || itemType === "UserMessage") {
+    return makeEvent(index, timestamp, "event_msg", "user", "User", text, record, options, { sourceSubtype: subtype, role: "user" });
+  }
+  if (type === "agent_message" || itemType === "AgentMessage") {
+    return makeEvent(index, timestamp, "event_msg", "assistant", "Assistant", text, record, options, { sourceSubtype: subtype, role: "assistant" });
+  }
+  if (/reason|analysis/i.test(type) || itemType === "Reasoning") {
+    return makeEvent(index, timestamp, "event_msg", "reasoning", "Reasoning", text, record, options, { sourceSubtype: subtype });
+  }
+  return makeEvent(index, timestamp, "event_msg", "event", itemType || type, text, record, options, { sourceSubtype: subtype });
+}
+
+function makeEvent(index, timestamp, sourceType, kind, title, content, record, options, extra = {}) {
+  const hasContent = typeof content === "string";
+  const event = {
+    index,
+    timestamp,
+    sourceType,
+    kind,
+    title: title || kind,
+    hasContent,
+    contentLength: hasContent ? content.length : 0,
+    preview: hasContent ? previewOf(content) : undefined,
+    ...extra,
+  };
+  if (hasContent && (kind === "user" || kind === "assistant")) event.contentHash = hashText(content);
+  if (options.keepContent && hasContent) event.content = content;
+  if (options.keepRaw) event.raw = record;
+  return event;
+}
+
+function extract(value) {
+  if (typeof value === "string") return value;
+  if (Array.isArray(value)) {
+    const parts = value.map(extract).filter((item) => item !== undefined);
+    return parts.length ? parts.join("\n\n") : undefined;
+  }
+  if (!obj(value)) return undefined;
+  for (const key of ["text", "message", "content", "output_text", "input_text", "output", "summary"]) {
+    const result = extract(value[key]);
+    if (result !== undefined && result !== "") return result;
+  }
+  return undefined;
+}
+
+function conversationEvents(events) {
+  const out = [];
+  const seenReasoning = new Set();
+  const hasResponseReasoning = events.some(
+    (event) => event.kind === "reasoning" && event.sourceType === "response_item",
+  );
+  const hasReadableResponseReasoning = events.some(
+    (event) => event.kind === "reasoning" && event.sourceType === "response_item" && event.hasContent,
+  );
+  const hasReadableEventReasoning = events.some(
+    (event) => event.kind === "reasoning" && event.sourceType === "event_msg" && event.hasContent,
+  );
+  for (const event of events) {
+    const direct = ["user", "assistant", "system", "tool-call", "tool-result", "reasoning"].includes(event.kind);
+    if (!direct) continue;
+    if (event.sourceType === "event_msg" && event.sourceSubtype === "item_completed:Reasoning" && hasResponseReasoning && (hasReadableResponseReasoning || !event.hasContent)) continue;
+    if (event.sourceType === "response_item" && event.sourceSubtype === "reasoning" && !hasReadableResponseReasoning && hasReadableEventReasoning) continue;
+    if (event.kind === "reasoning" && event.hasContent) {
+      const key = `${event.contentLength}:${event.contentHash || hashText(event.content || event.preview || "")}`;
+      if (seenReasoning.has(key)) continue;
+      seenReasoning.add(key);
+    }
+    out.push(event);
+  }
+  return out;
+}
+
+function hydrateEvent(event) {
+  if (event.raw !== undefined) return event;
+  if (!event.ref) return event;
+  const line = readLineRef(event.ref);
+  const record = JSON.parse(line);
+  const hydrated = norm(record, event.index, { keepRaw: true, keepContent: true });
+  hydrated.lineNumber = event.lineNumber;
+  hydrated.ref = event.ref;
+  return hydrated;
+}
+
+async function* jsonlLines(filePath) {
+  const stream = fs.createReadStream(filePath);
+  let carry = Buffer.alloc(0);
+  let carryOffset = 0;
+  let lineNumber = 0;
+
+  try {
+    for await (const chunk of stream) {
+      const data = carry.length ? Buffer.concat([carry, chunk]) : chunk;
+      let start = 0;
+      for (let end = 0; end < data.length; end += 1) {
+        if (data[end] !== 10) continue;
+        let contentEnd = end;
+        if (contentEnd > start && data[contentEnd - 1] === 13) contentEnd -= 1;
+        yield {
+          line: lineNumber++,
+          offset: carryOffset + start,
+          length: contentEnd - start,
+          text: data.toString("utf8", start, contentEnd),
+        };
+        start = end + 1;
+      }
+
+      if (start === data.length) {
+        carry = Buffer.alloc(0);
+        carryOffset += data.length;
+      } else {
+        carry = Buffer.from(data.subarray(start));
+        carryOffset += start;
+      }
+    }
+
+    if (carry.length) {
+      let contentEnd = carry.length;
+      if (contentEnd && carry[contentEnd - 1] === 13) contentEnd -= 1;
+      yield {
+        line: lineNumber,
+        offset: carryOffset,
+        length: contentEnd,
+        text: carry.toString("utf8", 0, contentEnd),
+      };
+    }
+  } finally {
+    stream.destroy();
+  }
+}
+
+function readLineRef(ref) {
+  if (!ref || ref.offset === null || ref.length === undefined) return "";
+  const fd = fs.openSync(ref.filePath, "r");
+  try {
+    const buffer = Buffer.alloc(ref.length);
+    let total = 0;
+    while (total < ref.length) {
+      const read = fs.readSync(fd, buffer, total, ref.length - total, ref.offset + total);
+      if (!read) break;
+      total += read;
+    }
+    return buffer.toString("utf8", 0, total);
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+function rawView(parent, trace) {
+  const wrap = parent.createDiv({ cls: "atr-raw-view" });
+  const info = wrap.createDiv({
+    cls: "atr-raw-info",
+    text: `${trace.lineCount.toLocaleString()} lines · paged read-only evidence`,
+  });
+  if (trace.filePath) info.setAttribute("title", trace.filePath);
+  const controls = wrap.createDiv({ cls: "atr-raw-controls" });
+  const loadedLines = [];
+  copyButton(controls, "Copy loaded raw lines", () => loadedLines.join("\n"), { text: "Copy loaded" });
+  const pre = wrap.createEl("pre", { cls: "atr-raw" });
+  const more = wrap.createEl("button", { cls: "atr-load-more", attr: { type: "button" } });
+  let cursor = 0;
+  let rawLines;
+  if (trace.raw !== undefined) rawLines = trace.raw.split(/\r?\n/);
+
+  const updateMore = () => {
+    const remaining = trace.lineCount - cursor;
+    if (!remaining) {
+      more.remove();
+      return;
+    }
+    more.textContent = `Load next ${Math.min(RAW_PAGE_SIZE, remaining).toLocaleString()} lines · ${remaining.toLocaleString()} remaining`;
+  };
+
+  const renderNext = () => {
+    const end = Math.min(cursor + RAW_PAGE_SIZE, trace.lineCount);
+    for (; cursor < end; cursor += 1) {
+      const line = trace.raw !== undefined ? rawLines[cursor] || "" : readLineRef(trace.lineRefs[cursor]);
+      loadedLines.push(line);
+      const lineEl = pre.createDiv({ cls: "atr-raw-line" });
+      lineEl.createSpan({ cls: "atr-line-number", text: String(cursor + 1) });
+      lineEl.createSpan({ cls: "atr-line-content", text: line });
+    }
+    updateMore();
+  };
+
+  more.onclick = renderNext;
+  renderNext();
+}
+
+async function scan(root, limit) {
+  const found = [];
+  const stack = [root];
+  while (stack.length) {
+    const current = stack.pop();
+    let entries;
+    try {
+      entries = fs.readdirSync(current, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      const filePath = path.join(current, entry.name);
+      if (entry.isDirectory()) {
+        stack.push(filePath);
+      } else if (entry.isFile() && entry.name.startsWith("rollout-") && entry.name.endsWith(".jsonl")) {
+        try {
+          const stat = fs.statSync(filePath);
+          found.push({ filePath, fileName: entry.name, modifiedMs: stat.mtimeMs });
+        } catch {
+          // The session may be rotating while the list is refreshed.
+        }
+      }
+    }
+  }
+  found.sort((a, b) => b.modifiedMs - a.modifiedMs);
+  const sessions = [];
+  for (const session of found.slice(0, limit)) sessions.push(await enrich(session));
+  return sessions;
+}
+
+async function enrich(session) {
+  let firstUser;
+  let preferredUser;
+  let reviewTitle;
+  try {
+    let records = 0;
+    for await (const line of jsonlLines(session.filePath)) {
+      if (!line.text.trim()) continue;
+      let record;
+      try {
+        record = JSON.parse(line.text);
+      } catch {
+        continue;
+      }
+      records += 1;
+      if (record.type === "session_meta" && obj(record.payload)) {
+        session.sessionId = str(record.payload.id) || str(record.payload.session_id) || session.sessionId;
+        session.cwd = str(record.payload.cwd) || session.cwd;
+        session.createdAt = str(record.timestamp) || session.createdAt;
+        const sessionTitle = str(record.payload.title);
+        if (sessionTitle && !isBootstrap(sessionTitle)) session.title = sessionTitle;
+      }
+      const event = norm(record, 0, { keepRaw: false, keepContent: true });
+      const candidate = event.content || event.preview;
+      if (event.kind === "user" && event.hasContent) {
+        if (isBootstrap(candidate)) {
+          if (!reviewTitle) reviewTitle = transcriptTitle(candidate);
+        } else {
+          if (!firstUser) firstUser = candidate;
+          if (isUserMessageEvent(record) && !preferredUser) preferredUser = candidate;
+          if (preferredUser || firstUser) break;
+        }
+      }
+      if (records >= TITLE_SCAN_RECORDS) break;
+    }
+  } catch {
+    // Metadata is optional; the session remains openable from its path.
+  }
+  if (!session.title && (preferredUser || firstUser || reviewTitle)) {
+    session.title = titleOf(preferredUser || firstUser || reviewTitle);
+  }
+  return session;
+}
+
+function groups(sessions) {
+  const grouped = new Map();
+  for (const session of sessions) {
+    const label = day(session.modifiedMs);
+    if (!grouped.has(label)) grouped.set(label, []);
+    grouped.get(label).push(session);
+  }
+  return grouped;
+}
+
+function btn(parent, icon, label) {
+  const button = parent.createEl("button", {
+    cls: "clickable-icon atr-icon-button",
+    attr: { title: label, "aria-label": label },
+  });
+  setIcon(button, icon);
+  return button;
+}
+
+function copyButton(parent, label, getText, options = {}) {
+  const button = parent.createEl("button", {
+    cls: `clickable-icon atr-copy-button${options.text ? " atr-copy-labeled" : ""}`,
+    attr: { type: "button", title: label, "aria-label": label },
+  });
+  setIcon(button, "copy");
+  if (options.text) button.createSpan({ text: options.text });
+  button.onclick = async (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    try {
+      const value = await getText();
+      if (value === undefined || value === null || String(value).length === 0) {
+        throw new Error("Nothing to copy");
+      }
+      await copyText(String(value));
+      button.addClass("is-copied");
+      const clearCopied = typeof window !== "undefined" ? window.setTimeout : setTimeout;
+      clearCopied(() => button.removeClass("is-copied"), 1200);
+      if (typeof Notice === "function") new Notice(`${label} copied`);
+    } catch (error) {
+      if (typeof Notice === "function") new Notice(`Could not copy: ${err(error)}`);
+    }
+  };
+  return button;
+}
+
+async function copyText(value) {
+  if (typeof navigator !== "undefined" && navigator.clipboard?.writeText) {
+    try {
+      await navigator.clipboard.writeText(value);
+      return;
+    } catch {
+      // Fall through to the focused-document fallback used by older Electron builds.
+    }
+  }
+  if (typeof document === "undefined" || !document.body) throw new Error("Clipboard unavailable");
+  const textarea = document.createElement("textarea");
+  textarea.value = value;
+  textarea.setAttribute("readonly", "");
+  textarea.style.position = "fixed";
+  textarea.style.opacity = "0";
+  document.body.appendChild(textarea);
+  textarea.select();
+  try {
+    if (!document.execCommand("copy")) throw new Error("Clipboard unavailable");
+  } finally {
+    textarea.remove();
+  }
+}
+
+function eventCopyText(event) {
+  const hydrated = hydrateEvent(event);
+  if (hydrated?.content !== undefined) return hydrated.content;
+  if (hydrated?.raw !== undefined) return JSON.stringify(hydrated.raw, null, 2);
+  return hydrated?.title || event.title || "";
+}
+
+function copyEventCollection(events) {
+  return events
+    .map((event) => eventCopyText(event))
+    .filter((value) => value !== undefined && value !== "")
+    .join("\n\n");
+}
+
+function jsonValueText(value) {
+  return typeof value === "string" ? value : JSON.stringify(value);
+}
+
+function dedupeMessages(events) {
+  const out = [];
+  for (const event of events) {
+    if ((event.kind === "user" || event.kind === "assistant") && event.hasContent) {
+      let duplicate = false;
+      for (let index = out.length - 1; index >= 0; index -= 1) {
+        const previous = out[index];
+        if ((previous.kind === "assistant" && event.kind === "user") || (previous.kind === "user" && event.kind === "assistant")) break;
+        if (previous.kind === event.kind && sameMessage(previous, event)) {
+          duplicate = true;
+          break;
+        }
+      }
+      if (duplicate) continue;
+    }
+    out.push(event);
+  }
+  return out;
+}
+
+function sameMessage(a, b) {
+  if (a.content !== undefined && b.content !== undefined) return a.content === b.content;
+  return a.contentLength === b.contentLength && Boolean(a.contentHash) && a.contentHash === b.contentHash;
+}
+
+function obj(value) {
+  return value && typeof value === "object" && !Array.isArray(value);
+}
+
+function str(value) {
+  return typeof value === "string" ? value : undefined;
+}
+
+function err(error) {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function home(value) {
+  if (value === "~") return os.homedir();
+  return value.startsWith("~/") ? path.join(os.homedir(), value.slice(2)) : value;
+}
+
+function dir(value) {
+  try {
+    return fs.statSync(value).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+function basename(value) {
+  return value ? path.basename(value) : "";
+}
+
+function short(value) {
+  return value.length > 12 ? `${value.slice(0, 8)}…${value.slice(-4)}` : value;
+}
+
+function displaySessionTitle(session, titleCounts) {
+  const title = session.title || "Untitled session";
+  const duplicate = (titleCounts.get(title) || 0) > 1;
+  if (!duplicate && session.title) return title;
+  const suffix = session.sessionId ? short(session.sessionId) : session.fileName;
+  return `${title} · ${suffix}`;
+}
+
+function cap(value) {
+  return value ? value[0].toUpperCase() + value.slice(1) : value;
+}
+
+function titleOf(value) {
+  let text = String(value || "").trim();
+  const transcriptTitleValue = transcriptTitle(text);
+  if (transcriptTitleValue) text = transcriptTitleValue;
+  return text.replace(/\s+/g, " ").trim().slice(0, 80) || "Untitled session";
+}
+
+function transcriptTitle(value) {
+  const text = String(value || "").trim();
+  if (!/^The following is the Codex agent history\b/i.test(text)) return undefined;
+  const transcriptUser = text.match(/\[\d+\]\s+user:\s*([^\r\n]+)/i);
+  return transcriptUser ? transcriptUser[1].trim() : undefined;
+}
+
+function isBootstrap(value) {
+  const text = String(value || "").trim();
+  return /^#\s*AGENTS\.md instructions\b/i.test(text)
+    || /^<recommended_plugins>/i.test(text)
+    || /^<skills_instructions>/i.test(text)
+    || /^<plugins_instructions>/i.test(text)
+    || /^<apps_instructions>/i.test(text)
+    || /^<collaboration_mode>/i.test(text)
+    || /^<permissions instructions>/i.test(text)
+    || /^<environment_context>/i.test(text)
+    || /^<turn_aborted>/i.test(text)
+    || /^The following is the Codex agent history\b/i.test(text)
+    || /^The following is the Codex agent history added since your last approval assessment\b/i.test(text)
+    || /^You are Codex\b/i.test(text);
+}
+
+function isUserMessageEvent(record) {
+  return record?.type === "event_msg"
+    && (record.payload?.type === "user_message" || record.payload?.item?.type === "UserMessage");
+}
+
+function previewOf(value) {
+  return value.replace(/\s+/g, " ").trim().slice(0, PREVIEW_CHARS);
+}
+
+function fmt(milliseconds) {
+  return new Date(milliseconds).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+}
+
+function time(value) {
+  const date = new Date(value);
+  return isNaN(date) ? String(value).slice(0, 8) : date.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+}
+
+function day(milliseconds) {
+  const now = new Date();
+  const target = new Date(milliseconds);
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+  const date = new Date(target.getFullYear(), target.getMonth(), target.getDate()).getTime();
+  const difference = Math.round((today - date) / 86400000);
+  return difference === 0 ? "Today" : difference === 1 ? "Yesterday" : "Earlier";
+}
+
+function looksMd(value) {
+  return /(^|\n)#{1,6}\s|(^|\n)\s*[-*+]\s|```|\[[^\]]+\]\([^\)]+\)|(^|\n)>\s/m.test(value);
+}
+
+function tryJson(value) {
+  const trimmed = value.trim();
+  if (!(trimmed.startsWith("{") || trimmed.startsWith("["))) return null;
+  try {
+    return JSON.parse(trimmed);
+  } catch {
+    return null;
+  }
+}
+
+function formatBytes(bytes) {
+  if (bytes < 1024) return `${bytes} B`;
+  const units = ["KB", "MB", "GB"];
+  let value = bytes;
+  let unit = "B";
+  for (const next of units) {
+    value /= 1024;
+    unit = next;
+    if (value < 1024 || next === units[units.length - 1]) break;
+  }
+  return `${value.toFixed(value >= 10 ? 0 : 1)} ${unit}`;
+}
+
+function formatChars(chars) {
+  return `${Number(chars || 0).toLocaleString()} chars`;
+}
+
+function hashText(value) {
+  let hash = 2166136261;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(16);
+}
