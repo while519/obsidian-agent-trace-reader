@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.0 - 2026-09-22
 - Added per-trace file change detection with an explicit Auto-follow toggle; default change notices do not parse until Refresh is requested.
 - Batched large Process copy reads asynchronously through one open handle per source file.
 - Split the source into `src/sources/codex.js`, shared utilities, and views, with an esbuild-generated root artifact and CI build validation.
@@ -14,7 +14,6 @@
 - Improved session overview spacing with readable cards, section counts, and Today/Yesterday/Earlier accent colors.
 - Added contextual copy actions across session paths, conversation messages, Process blocks, trajectory events, smart strings, JSON values, and loaded Raw pages.
 
-## 0.2.0
 - Added automatic local Codex session discovery.
 - Added Conversation / Trajectory / Raw views.
 - Added compact Process grouping for tool/system/reasoning traffic.

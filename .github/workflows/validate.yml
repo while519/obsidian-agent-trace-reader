@@ -17,4 +17,16 @@ jobs:
       - run: git diff --exit-code -- main.js
       - run: node --check main.js
       - run: npm test
-      - run: node -e "JSON.parse(require('fs').readFileSync('manifest.json','utf8')); JSON.parse(require('fs').readFileSync('versions.json','utf8'))"
+      - run: |
+          node <<'NODE'
+          const fs = require("fs");
+          const manifest = JSON.parse(fs.readFileSync("manifest.json", "utf8"));
+          const packageJson = JSON.parse(fs.readFileSync("package.json", "utf8"));
+          const versions = JSON.parse(fs.readFileSync("versions.json", "utf8"));
+          if (manifest.version !== packageJson.version) {
+            throw new Error(`manifest.json (${manifest.version}) does not match package.json (${packageJson.version})`);
+          }
+          if (versions[manifest.version] !== manifest.minAppVersion) {
+            throw new Error(`versions.json has no matching entry for ${manifest.version}`);
+          }
+          NODE
