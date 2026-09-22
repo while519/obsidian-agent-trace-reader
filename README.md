@@ -12,13 +12,13 @@ A local-first, read-only reader for agent traces. v0.2 focuses on **Codex rollou
 - Unknown record types are never dropped; inspect them in Trajectory or Raw.
 - Generic `.json`, `.jsonl`, and `.ndjson` files in the vault still get a smart reader.
 
-## Install with BRAT
+## Install
 
-Until the first stable merge/release, add this repository in BRAT and select the development branch `dev/agent-trace-reader-v0.2`.
+For this development PR, test by copying `main.js`, `manifest.json`, and `styles.css` from the `dev/agent-trace-reader-v0.2` branch into `<Vault>/.obsidian/plugins/agent-trace-reader/`, then reload Obsidian and enable **Agent Trace Reader**.
 
-Repository: `while519/obsidian-agent-trace-reader`
+After the first tagged release, BRAT becomes the one-step install/update path: add `while519/obsidian-agent-trace-reader` in BRAT.
 
-After installation, enable **Agent Trace Reader** and click the messages icon in Obsidian's left ribbon.
+Click the messages icon in Obsidian's left ribbon to open sessions.
 
 The default Codex source is:
 
