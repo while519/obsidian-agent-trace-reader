@@ -21,9 +21,30 @@ A local-first, read-only reader for agent traces. v0.2 focuses on **Codex rollou
 
 ## Install
 
-For this development PR, test by copying `main.js`, `manifest.json`, and `styles.css` from the `dev/agent-trace-reader-v0.2` branch into `<Vault>/.obsidian/plugins/agent-trace-reader/`, then reload Obsidian and enable **Agent Trace Reader**.
+### Community Plugins
 
-After the first tagged release, BRAT becomes the one-step install/update path: add `while519/obsidian-agent-trace-reader` in BRAT.
+Submission to the Obsidian Community Plugins directory is planned. Once it is listed, install it from:
+
+`Settings → Community plugins → Browse → Agent Trace Reader`
+
+### BRAT
+
+Until the Community Plugins listing is available, install the current public release with [BRAT](https://github.com/TfTHacker/obsidian42-brat):
+
+1. Install and enable **BRAT** in Obsidian.
+2. Run **BRAT: Add a beta plugin for testing**.
+3. Enter `while519/obsidian-agent-trace-reader`.
+4. Enable **Agent Trace Reader** under Community plugins.
+
+The current public release is **0.2.0**.
+
+### Manual installation
+
+Download `main.js`, `manifest.json`, and `styles.css` from the latest GitHub Release and place them in:
+
+`<Vault>/.obsidian/plugins/agent-trace-reader/`
+
+Reload Obsidian, then enable **Agent Trace Reader**.
 
 Click the messages icon in Obsidian's left ribbon to open sessions.
 
