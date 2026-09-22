@@ -619,12 +619,7 @@ var require_codex = __commonJS({
       collectRollouts(path.join(root, "archived_sessions"), true, found);
       collectDirectRollouts(root, found);
       found.sort((a, b) => b.modifiedMs - a.modifiedMs);
-      const archived = found.filter((session) => session.archived);
-      const active = found.filter((session) => !session.archived);
-      const selected = [
-        ...archived.slice(0, limit),
-        ...active.slice(0, Math.max(0, limit - archived.length))
-      ].sort((a, b) => b.modifiedMs - a.modifiedMs);
+      const selected = found.slice(0, limit);
       const sessions = [];
       for (const session of selected) sessions.push(await enrich(session));
       return sessions;

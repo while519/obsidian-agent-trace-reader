@@ -159,21 +159,29 @@ test("discovers active and archived Codex rollouts under a Codex home", async ()
   fs.mkdirSync(archivedDir, { recursive: true });
 
   try {
-    const activeRecords = [
-      line({ type: "session_meta", payload: { id: "active", cwd: "/tmp/active" } }),
-      line({ type: "event_msg", payload: { type: "user_message", message: "Active" } }),
-    ].join("\n") + "\n";
-    const archivedRecords = [
-      line({ type: "session_meta", payload: { id: "archived", cwd: "/tmp/archived" } }),
-      line({ type: "event_msg", payload: { type: "user_message", message: "Archived" } }),
-    ].join("\n") + "\n";
-    fs.writeFileSync(path.join(activeDir, "rollout-active.jsonl"), activeRecords);
-    fs.writeFileSync(path.join(archivedDir, "rollout-archived.jsonl"), archivedRecords);
+    const writeSession = (dir, fileName, sessionId, message, modifiedMs) => {
+      const filePath = path.join(dir, fileName);
+      const records = [
+        line({ type: "session_meta", payload: { id: sessionId, cwd: `/tmp/${sessionId}` } }),
+        line({ type: "event_msg", payload: { type: "user_message", message } }),
+      ].join("\n") + "\n";
+      fs.writeFileSync(filePath, records);
+      const time = new Date(modifiedMs);
+      fs.utimesSync(filePath, time, time);
+    };
 
-    const sessions = await scan(tempDir, 2);
-    assert.equal(sessions.length, 2);
-    assert.equal(sessions.find((session) => session.sessionId === "active").archived, false);
-    assert.equal(sessions.find((session) => session.sessionId === "archived").archived, true);
+    writeSession(archivedDir, "rollout-archived-old-1.jsonl", "archived-old-1", "Archived old 1", 1700000000000);
+    writeSession(archivedDir, "rollout-archived-old-2.jsonl", "archived-old-2", "Archived old 2", 1700000001000);
+    writeSession(activeDir, "rollout-active-new-1.jsonl", "active-new-1", "Active new 1", 1700000002000);
+    writeSession(activeDir, "rollout-active-new-2.jsonl", "active-new-2", "Active new 2", 1700000003000);
+
+    const limited = await scan(tempDir, 2);
+    assert.deepEqual(limited.map((session) => session.sessionId), ["active-new-2", "active-new-1"]);
+
+    const sessions = await scan(tempDir, 4);
+    assert.equal(sessions.length, 4);
+    assert.equal(sessions.find((session) => session.sessionId === "active-new-1").archived, false);
+    assert.equal(sessions.find((session) => session.sessionId === "archived-old-1").archived, true);
     assert.equal(codexHomeFromLegacy(path.join(tempDir, "sessions")), tempDir);
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
