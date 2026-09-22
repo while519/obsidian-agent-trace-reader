@@ -187,6 +187,15 @@
   color: var(--text-normal);
 }
 
+.atr-session-archived {
+  background: var(--background-modifier-hover);
+  border: 1px solid var(--atr-border);
+  border-radius: 999px;
+  color: var(--atr-muted);
+  font-size: 0.8em;
+  padding: 1px 6px;
+}
+
 .atr-session-cwd {
   color: var(--atr-muted);
 }
@@ -248,6 +257,18 @@
 .atr-tabs {
   display: flex;
   gap: 4px;
+}
+
+.atr-trace-controls {
+  align-items: center;
+  display: flex;
+  flex: 0 0 auto;
+  gap: 8px;
+}
+
+.atr-icon-button:disabled {
+  cursor: wait;
+  opacity: 0.5;
 }
 
 .atr-tab,

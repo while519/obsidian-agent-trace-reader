@@ -6,7 +6,7 @@ const test = require("node:test");
 const vm = require("node:vm");
 
 function loadInternals() {
-  const source = `${fs.readFileSync(path.join(__dirname, "..", "main.js"), "utf8")}\nthis.__agentTraceReaderInternals = { parseTrace, parseTraceFile, hydrateEvent, conversationEvents, isBootstrap, displaySessionTitle };`;
+  const source = `${fs.readFileSync(path.join(__dirname, "..", "main.js"), "utf8")}\nthis.__agentTraceReaderInternals = { parseTrace, parseTraceFile, hydrateEvent, conversationEvents, isBootstrap, displaySessionTitle, scan, codexHomeFromLegacy };`;
   class Base {}
   class Setting {
     setName() { return this; }
@@ -68,7 +68,10 @@ test("prefers Codex event_msg user title and deduplicates mirrored messages", ()
   assert.equal(trace.events.filter((event) => event.kind === "tool-call").length, 1);
   assert.equal(trace.events.filter((event) => event.kind === "tool-result").length, 1);
   assert.ok(trace.events.some((event) => event.kind === "unknown" && event.sourceType === "world_state"));
-  assert.ok(conversationEvents(trace.events).some((event) => event.kind === "assistant"));
+  const conversation = conversationEvents(trace.events);
+  assert.equal(conversation.filter((event) => event.kind === "user").length, 1);
+  assert.equal(conversation.find((event) => event.kind === "user").content, "Actual user request");
+  assert.ok(conversation.some((event) => event.kind === "assistant"));
   assert.equal(isBootstrap("<recommended_plugins>\nHere is a list of plugins"), true);
   assert.equal(isBootstrap("Actual user request"), false);
 });
@@ -86,7 +89,7 @@ test("recognizes current UserMessage completion events as title candidates", () 
 });
 
 test("uses the embedded request for approval-review sessions without exposing the wrapper", () => {
-  const { parseTrace } = loadInternals();
+  const { parseTrace, conversationEvents } = loadInternals();
   const wrapper = "The following is the Codex agent history whose request action you are assessing.\n>>> TRANSCRIPT START\n[1] user: Review the plugin changes\n>>> TRANSCRIPT END";
   const raw = [
     line({ type: "session_meta", timestamp: "2026-09-22T01:00:00Z", payload: { id: "review-1" } }),
@@ -95,6 +98,10 @@ test("uses the embedded request for approval-review sessions without exposing th
 
   const trace = parseTrace(raw);
   assert.equal(trace.title, "Review the plugin changes");
+  const conversation = conversationEvents(trace.events);
+  assert.equal(conversation.filter((event) => event.kind === "user").length, 1);
+  assert.equal(conversation[0].content, "Review the plugin changes");
+  assert.equal(conversation[0].content.includes("Codex agent history"), false);
 });
 
 test("disambiguates repeated overview titles with a stable session suffix", () => {
@@ -109,11 +116,11 @@ test("streams large traces and hydrates an event only when requested", async () 
   const { parseTraceFile, hydrateEvent } = loadInternals();
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "agent-trace-reader-"));
   const filePath = path.join(tempDir, "rollout-large.jsonl");
-  const filler = "trace-output-".repeat(1800);
+  const filler = "中文跨chunk-".repeat(10000);
   const records = [
     line({ type: "session_meta", timestamp: "2026-09-22T01:00:00Z", payload: { id: "large", cwd: "/tmp/project" } }),
   ];
-  for (let index = 0; index < 1000; index += 1) {
+  for (let index = 0; index < 140; index += 1) {
     records.push(line({
       type: "response_item",
       timestamp: "2026-09-22T01:00:01Z",
@@ -133,6 +140,66 @@ test("streams large traces and hydrates an event only when requested", async () 
     assert.equal(assistant.hasContent, true);
     assert.equal(hydrateEvent(assistant).content, `${filler}-0`);
     assert.equal(hydrateEvent(assistant).raw.payload.role, "assistant");
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("re-reading a growing trace includes records appended after the first read", async () => {
+  const { parseTraceFile } = loadInternals();
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "agent-trace-reader-refresh-"));
+  const filePath = path.join(tempDir, "rollout-running.jsonl");
+  const first = line({
+    type: "session_meta",
+    timestamp: "2026-09-22T01:00:00Z",
+    payload: { id: "running" },
+  });
+  const next = line({
+    type: "event_msg",
+    timestamp: "2026-09-22T01:00:01Z",
+    payload: { type: "user_message", message: "Appended request" },
+  });
+
+  try {
+    fs.writeFileSync(filePath, `${first}\n`);
+    const initial = await parseTraceFile(filePath);
+    assert.equal(initial.lineCount, 1);
+    assert.equal(initial.title, "Untitled session");
+
+    fs.appendFileSync(filePath, `${next}\n`);
+    const refreshed = await parseTraceFile(filePath);
+    assert.equal(refreshed.lineCount, 2);
+    assert.equal(refreshed.title, "Appended request");
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("discovers active and archived Codex rollouts under a Codex home", async () => {
+  const { scan, codexHomeFromLegacy } = loadInternals();
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "agent-trace-reader-home-"));
+  const activeDir = path.join(tempDir, "sessions", "2026", "09", "22");
+  const archivedDir = path.join(tempDir, "archived_sessions", "2026", "09", "21");
+  fs.mkdirSync(activeDir, { recursive: true });
+  fs.mkdirSync(archivedDir, { recursive: true });
+
+  try {
+    const activeRecords = [
+      line({ type: "session_meta", payload: { id: "active", cwd: "/tmp/active" } }),
+      line({ type: "event_msg", payload: { type: "user_message", message: "Active" } }),
+    ].join("\n") + "\n";
+    const archivedRecords = [
+      line({ type: "session_meta", payload: { id: "archived", cwd: "/tmp/archived" } }),
+      line({ type: "event_msg", payload: { type: "user_message", message: "Archived" } }),
+    ].join("\n") + "\n";
+    fs.writeFileSync(path.join(activeDir, "rollout-active.jsonl"), activeRecords);
+    fs.writeFileSync(path.join(archivedDir, "rollout-archived.jsonl"), archivedRecords);
+
+    const sessions = await scan(tempDir, 2);
+    assert.equal(sessions.length, 2);
+    assert.equal(sessions.find((session) => session.sessionId === "active").archived, false);
+    assert.equal(sessions.find((session) => session.sessionId === "archived").archived, true);
+    assert.equal(codexHomeFromLegacy(path.join(tempDir, "sessions")), tempDir);
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }

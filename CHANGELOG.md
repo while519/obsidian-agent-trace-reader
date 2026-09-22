@@ -1,6 +1,10 @@
 # Changelog
 
 ## Unreleased
+- Filtered Codex bootstrap/runtime wrappers from the Conversation projection while retaining them in Trajectory and Raw; approval-review envelopes now show their embedded user request.
+- Added `CODEX_HOME`/`~/.codex` discovery for both active and archived sessions, with Archived overview markers.
+- Made CI run the parser/large-trace test suite and gated releases on an exact tag/manifest version match.
+- Added a lightweight manual **Refresh trace** action for sessions that are still running; refresh re-reads the current file without background polling.
 - Filtered Codex runtime/approval wrappers from session titles and disambiguated repeated overview titles with short session ids.
 - Made expanded Process summaries sticky while scrolling through long blocks.
 - Improved session overview spacing with readable cards, section counts, and Today/Yesterday/Earlier accent colors.

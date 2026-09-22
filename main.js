@@ -24,15 +24,20 @@ const RAW_PAGE_SIZE = 200;
 const PROCESS_PAGE_SIZE = 200;
 const PREVIEW_CHARS = 180;
 const TITLE_SCAN_RECORDS = 120;
+const DEFAULT_CODEX_HOME = process.env.CODEX_HOME || path.join(os.homedir(), ".codex");
 const DEF = {
-  codexSessionsPath: path.join(os.homedir(), ".codex", "sessions"),
+  codexHomePath: DEFAULT_CODEX_HOME,
   maxSessions: 300,
   compactConversation: true,
 };
 
 class P extends Plugin {
   async onload() {
-    this.settings = { ...DEF, ...((await this.loadData()) || {}) };
+    const saved = (await this.loadData()) || {};
+    this.settings = { ...DEF, ...saved };
+    if (!saved.codexHomePath && saved.codexSessionsPath) {
+      this.settings.codexHomePath = codexHomeFromLegacy(saved.codexSessionsPath);
+    }
     this.registerView(VS, (leaf) => new Sessions(leaf, this));
     this.registerView(VT, (leaf) => new Trace(leaf, this));
     this.registerView(VJ, (leaf) => new JsonView(leaf));
@@ -77,15 +82,15 @@ class Settings extends PluginSettingTab {
     el.createEl("h2", { text: "Agent Trace Reader" });
 
     new Setting(el)
-      .setName("Codex sessions folder")
-      .setDesc("Default: ~/.codex/sessions. Read-only; nothing is copied into the vault.")
+      .setName("Codex home")
+      .setDesc("Reads sessions/ and archived_sessions/ under this folder. Read-only; nothing is copied into the vault.")
       .addText((text) =>
         text
-          .setValue(this.p.settings.codexSessionsPath)
+          .setValue(this.p.settings.codexHomePath)
           .onChange(async (value) => {
             const next = value.trim();
             if (!next) return;
-            this.p.settings.codexSessionsPath = home(next);
+            this.p.settings.codexHomePath = home(next);
             await this.p.save();
           }),
       );
@@ -149,14 +154,14 @@ class Sessions extends ItemView {
     const refresh = btn(header, "refresh-cw", "Refresh");
     refresh.onclick = () => this.render();
 
-    const root = home(this.p.settings.codexSessionsPath);
+    const root = home(this.p.settings.codexHomePath || DEFAULT_CODEX_HOME);
     const source = rootEl.createDiv({ cls: "atr-source" });
     source.createSpan({ text: root });
-    copyButton(source, "Copy sessions folder", () => root, { text: "Copy path" });
+    copyButton(source, "Copy Codex home", () => root, { text: "Copy path" });
     if (!dir(root)) {
       rootEl.createDiv({
         cls: "atr-empty-card",
-        text: "Codex sessions folder not found. Set it in Settings → Agent Trace Reader.",
+        text: "Codex home not found. Set it in Settings → Agent Trace Reader.",
       });
       return;
     }
@@ -200,6 +205,7 @@ class Sessions extends ItemView {
         cardEl.createDiv({ cls: "atr-session-title", text: title });
         const meta = cardEl.createDiv({ cls: "atr-session-meta" });
         meta.createSpan({ cls: "atr-session-date", text: fmt(session.modifiedMs) });
+        if (session.archived) meta.createSpan({ cls: "atr-session-archived", text: "Archived" });
         if (session.cwd) meta.createSpan({ cls: "atr-session-cwd", text: session.cwd });
         if (session.sessionId) meta.createSpan({ cls: "atr-session-id", text: short(session.sessionId) });
         cardEl.onclick = () => this.p.openTrace(session.filePath);
@@ -218,6 +224,7 @@ class Trace extends ItemView {
     this.tab = "conversation";
     this.trace = null;
     this.loadSerial = 0;
+    this.loading = false;
   }
 
   getViewType() {
@@ -248,6 +255,7 @@ class Trace extends ItemView {
 
   async load() {
     const serial = ++this.loadSerial;
+    this.loading = true;
     this.contentEl.empty();
     this.contentEl.addClass("atr-trace");
     this.contentEl.createDiv({ cls: "atr-loading", text: "Loading trace…" });
@@ -256,9 +264,11 @@ class Trace extends ItemView {
       const trace = await parseTraceFile(this.filePath);
       if (serial !== this.loadSerial) return;
       this.trace = trace;
+      this.loading = false;
       this.render();
     } catch (error) {
       if (serial !== this.loadSerial) return;
+      this.loading = false;
       this.trace = null;
       this.contentEl.empty();
       this.contentEl.addClass("atr-trace");
@@ -283,7 +293,11 @@ class Trace extends ItemView {
     if (trace.isLarge) meta.createSpan({ text: `${formatBytes(trace.fileSize)} · streamed` });
     copyButton(meta, "Copy trace path", () => this.filePath);
 
-    const tabs = header.createDiv({ cls: "atr-tabs" });
+    const controls = header.createDiv({ cls: "atr-trace-controls" });
+    const refresh = btn(controls, "refresh-cw", "Refresh trace");
+    refresh.disabled = this.loading;
+    refresh.onclick = () => this.load();
+    const tabs = controls.createDiv({ cls: "atr-tabs" });
     for (const tab of ["conversation", "trajectory", "raw"]) {
       const tabEl = tabs.createEl("button", {
         cls: `atr-tab${this.tab === tab ? " is-active" : ""}`,
@@ -906,7 +920,9 @@ function conversationEvents(events) {
   const hasReadableEventReasoning = events.some(
     (event) => event.kind === "reasoning" && event.sourceType === "event_msg" && event.hasContent,
   );
-  for (const event of events) {
+  for (const original of events) {
+    const event = projectConversationEvent(original);
+    if (!event) continue;
     const direct = ["user", "assistant", "system", "tool-call", "tool-result", "reasoning"].includes(event.kind);
     if (!direct) continue;
     if (event.sourceType === "event_msg" && event.sourceSubtype === "item_completed:Reasoning" && hasResponseReasoning && (hasReadableResponseReasoning || !event.hasContent)) continue;
@@ -919,6 +935,32 @@ function conversationEvents(events) {
     out.push(event);
   }
   return out;
+}
+
+function projectConversationEvent(event) {
+  if (event.kind !== "user" || !event.hasContent) return event;
+
+  let content = event.content;
+  if (content === undefined && isBootstrap(event.preview) && event.ref) {
+    try {
+      content = hydrateEvent(event)?.content;
+    } catch {
+      // Keep the bootstrap event out of the readable projection if its full line cannot be read.
+    }
+  }
+
+  const candidate = content !== undefined ? content : event.preview;
+  if (!isBootstrap(candidate)) return event;
+  const extracted = transcriptTitle(content || candidate);
+  if (!extracted) return undefined;
+  return {
+    ...event,
+    title: "User",
+    content: extracted,
+    contentLength: extracted.length,
+    preview: previewOf(extracted),
+    contentHash: hashText(extracted),
+  };
 }
 
 function hydrateEvent(event) {
@@ -1039,6 +1081,23 @@ function rawView(parent, trace) {
 
 async function scan(root, limit) {
   const found = [];
+  collectRollouts(path.join(root, "sessions"), false, found);
+  collectRollouts(path.join(root, "archived_sessions"), true, found);
+  collectDirectRollouts(root, found);
+  found.sort((a, b) => b.modifiedMs - a.modifiedMs);
+  const archived = found.filter((session) => session.archived);
+  const active = found.filter((session) => !session.archived);
+  const selected = [
+    ...archived.slice(0, limit),
+    ...active.slice(0, Math.max(0, limit - archived.length)),
+  ].sort((a, b) => b.modifiedMs - a.modifiedMs);
+  const sessions = [];
+  for (const session of selected) sessions.push(await enrich(session));
+  return sessions;
+}
+
+function collectRollouts(root, archived, found) {
+  if (!dir(root)) return;
   const stack = [root];
   while (stack.length) {
     const current = stack.pop();
@@ -1052,20 +1111,37 @@ async function scan(root, limit) {
       const filePath = path.join(current, entry.name);
       if (entry.isDirectory()) {
         stack.push(filePath);
-      } else if (entry.isFile() && entry.name.startsWith("rollout-") && entry.name.endsWith(".jsonl")) {
-        try {
-          const stat = fs.statSync(filePath);
-          found.push({ filePath, fileName: entry.name, modifiedMs: stat.mtimeMs });
-        } catch {
-          // The session may be rotating while the list is refreshed.
-        }
+      } else if (isRollout(entry)) {
+        addRollout(found, filePath, entry.name, archived);
       }
     }
   }
-  found.sort((a, b) => b.modifiedMs - a.modifiedMs);
-  const sessions = [];
-  for (const session of found.slice(0, limit)) sessions.push(await enrich(session));
-  return sessions;
+}
+
+function collectDirectRollouts(root, found) {
+  if (!dir(root)) return;
+  let entries;
+  try {
+    entries = fs.readdirSync(root, { withFileTypes: true });
+  } catch {
+    return;
+  }
+  for (const entry of entries) {
+    if (isRollout(entry)) addRollout(found, path.join(root, entry.name), entry.name, false);
+  }
+}
+
+function isRollout(entry) {
+  return entry.isFile() && entry.name.startsWith("rollout-") && entry.name.endsWith(".jsonl");
+}
+
+function addRollout(found, filePath, fileName, archived) {
+  try {
+    const stat = fs.statSync(filePath);
+    found.push({ filePath, fileName, modifiedMs: stat.mtimeMs, archived });
+  } catch {
+    // The session may be rotating while the list is refreshed.
+  }
 }
 
 async function enrich(session) {
@@ -1125,7 +1201,7 @@ function groups(sessions) {
 function btn(parent, icon, label) {
   const button = parent.createEl("button", {
     cls: "clickable-icon atr-icon-button",
-    attr: { title: label, "aria-label": label },
+    attr: { type: "button", title: label, "aria-label": label },
   });
   setIcon(button, icon);
   return button;
@@ -1242,6 +1318,12 @@ function home(value) {
   return value.startsWith("~/") ? path.join(os.homedir(), value.slice(2)) : value;
 }
 
+function codexHomeFromLegacy(value) {
+  const resolved = home(String(value || ""));
+  const base = path.basename(resolved);
+  return base === "sessions" || base === "archived_sessions" ? path.dirname(resolved) : resolved;
+}
+
 function dir(value) {
   try {
     return fs.statSync(value).isDirectory();
@@ -1286,7 +1368,7 @@ function transcriptTitle(value) {
 
 function isBootstrap(value) {
   const text = String(value || "").trim();
-  return /^#\s*AGENTS\.md instructions\b/i.test(text)
+  return /^#\s*AGENTS\.md\b/i.test(text)
     || /^<recommended_plugins>/i.test(text)
     || /^<skills_instructions>/i.test(text)
     || /^<plugins_instructions>/i.test(text)

@@ -5,12 +5,30 @@ on:
 permissions:
   contents: write
 jobs:
+  validate:
+    uses: ./.github/workflows/validate.yml
+    permissions:
+      contents: read
+
   release:
+    needs: validate
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Verify release tag matches manifest version
+        shell: bash
+        run: |
+          manifest_version="$(node -p "require('./manifest.json').version")"
+          if [ "$GITHUB_REF_NAME" != "$manifest_version" ]; then
+            echo "Release tag $GITHUB_REF_NAME does not match manifest version $manifest_version" >&2
+            exit 1
+          fi
       - uses: softprops/action-gh-release@v2
         with:
+          name: ${{ github.ref_name }}
           files: |
             main.js
             manifest.json

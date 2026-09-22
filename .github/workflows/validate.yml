@@ -3,6 +3,7 @@ on:
   push:
     branches: [main, "dev/**"]
   pull_request:
+  workflow_call:
 jobs:
   validate:
     runs-on: ubuntu-latest
@@ -13,3 +14,4 @@ jobs:
           node-version: 22
       - run: node --check main.js
       - run: node -e "JSON.parse(require('fs').readFileSync('manifest.json','utf8')); JSON.parse(require('fs').readFileSync('versions.json','utf8'))"
+      - run: node --test test/parse.test.js

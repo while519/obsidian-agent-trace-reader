@@ -4,11 +4,12 @@ A local-first, read-only reader for agent traces. v0.2 focuses on **Codex rollou
 
 ## Highlights
 
-- Auto-discovers Codex rollouts under `~/.codex/sessions` (configurable).
+- Auto-discovers Codex rollouts under `$CODEX_HOME` or `~/.codex`, including both `sessions/` and `archived_sessions/` (configurable).
 - Session browser grouped by recency; no symlink or copying into the vault.
 - Session overview uses separated, color-coded recency sections and readable cards.
 - Filters Codex runtime/bootstrap wrappers from titles; repeated titles get a short session-id suffix in the overview.
 - Three views over the same evidence: **Conversation / Trajectory / Raw**.
+- Running traces can be manually re-read with **Refresh trace**; no background polling is used.
 - Compact Conversation mode groups system/tool/reasoning traffic into collapsible Process blocks.
 - Expanded Process blocks keep their summary reachable while scrolling, so long blocks can be collapsed without returning to the top.
 - Long strings get **Rendered / Text / Raw / JSON** modes.
@@ -24,13 +25,14 @@ After the first tagged release, BRAT becomes the one-step install/update path: a
 
 Click the messages icon in Obsidian's left ribbon to open sessions.
 
-The default Codex source is:
+The default Codex home is:
 
 ```text
-~/.codex/sessions
+$CODEX_HOME or ~/.codex
 ```
 
-Change it under **Settings → Agent Trace Reader** if needed.
+The reader scans `sessions/` and `archived_sessions/` below that home. Archived sessions are marked
+in the overview. Change the home under **Settings → Agent Trace Reader** if needed.
 
 ## Design
 
@@ -51,12 +53,15 @@ The normalization layer is presentation-only. Original records remain available,
 - Session list reads only a small prefix for metadata/title.
 - Opening a trace streams JSONL instead of reading the whole file into one JavaScript string.
 - Large traces keep line offsets and normalized metadata in memory; event bodies and raw lines load on demand.
+- Refreshing a trace re-reads the current file snapshot, so newly appended complete lines become available without copying the trace into the vault.
 - Trajectory and Raw use paged rendering, and compact Conversation keeps Process bodies collapsed until opened.
 - Copying an event or Process hydrates only when the action is invoked; Raw offers a bounded **Copy loaded** action.
 - Markdown rendering is bounded for very large strings.
 - Generic JSONL rendering is capped at 1000 records.
 
-The session browser groups entries as **Today / Yesterday / Earlier**. The adapter recognizes
+The session browser groups entries as **Today / Yesterday / Earlier**. The Conversation projection
+filters Codex bootstrap/runtime user wrappers while leaving them available in Trajectory and Raw;
+approval-review envelopes show their embedded user request. The adapter recognizes
 both `response_item` messages/tool calls and Codex `event_msg` user/assistant messages, while
 preserving unknown records in Trajectory and Raw. Codex runtime wrappers such as
 `<recommended_plugins>`, `<environment_context>`, and approval-review transcript envelopes are
@@ -65,6 +70,7 @@ not used as session titles; review envelopes may use their embedded `[n] user:` 
 For a local syntax/fixture check (Node 18+):
 
 ```sh
+node --check main.js
 node --test test/parse.test.js
 ```
 
