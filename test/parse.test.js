@@ -3,39 +3,12 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
-const vm = require("node:vm");
 
 function loadInternals() {
-  const source = `${fs.readFileSync(path.join(__dirname, "..", "main.js"), "utf8")}\nthis.__agentTraceReaderInternals = { parseTrace, parseTraceFile, hydrateEvent, conversationEvents, isBootstrap, displaySessionTitle, scan, codexHomeFromLegacy, filterSessions };`;
-  class Base {}
-  class Setting {
-    setName() { return this; }
-    setDesc() { return this; }
-    addText() { return this; }
-    addToggle() { return this; }
-  }
-  const context = {
-    Buffer,
-    clearTimeout,
-    console,
-    module: { exports: {} },
-    process,
-    require: (name) => name === "obsidian"
-      ? {
-          ItemView: Base,
-          MarkdownRenderer: { render: () => Promise.resolve() },
-          Plugin: Base,
-          PluginSettingTab: Base,
-          Setting,
-          TextFileView: Base,
-          setIcon: () => {},
-        }
-      : require(name),
-    setTimeout,
+  return {
+    ...require(path.join(__dirname, "..", "src", "sources", "codex.js")),
+    ...require(path.join(__dirname, "..", "src", "shared.js")),
   };
-  vm.createContext(context);
-  vm.runInContext(source, context, { filename: "main.js" });
-  return context.__agentTraceReaderInternals;
 }
 
 function line(record) {
@@ -112,8 +85,8 @@ test("disambiguates repeated overview titles with a stable session suffix", () =
   assert.equal(displaySessionTitle({ sessionId: "01a0abcdef-9999", fileName: "rollout.jsonl" }, counts), "Untitled session · 01a0abcd…9999");
 });
 
-test("streams large traces and hydrates an event only when requested", async () => {
-  const { parseTraceFile, hydrateEvent } = loadInternals();
+test("streams large traces and hydrates events only when requested", async () => {
+  const { parseTraceFile, hydrateEvent, copyEventCollection } = loadInternals();
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "agent-trace-reader-"));
   const filePath = path.join(tempDir, "rollout-large.jsonl");
   const filler = "中文跨chunk-".repeat(10000);
@@ -140,6 +113,8 @@ test("streams large traces and hydrates an event only when requested", async () 
     assert.equal(assistant.hasContent, true);
     assert.equal(hydrateEvent(assistant).content, `${filler}-0`);
     assert.equal(hydrateEvent(assistant).raw.payload.role, "assistant");
+    const copied = await copyEventCollection(trace.events.filter((event) => event.kind === "assistant").slice(0, 2));
+    assert.ok(copied.startsWith(`${filler}-0\n\n${filler}-1`));
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }

@@ -10,7 +10,8 @@ A local-first, read-only reader for agent traces. v0.2 focuses on **Codex rollou
 - Session overview uses separated, color-coded recency sections and readable cards.
 - Filters Codex runtime/bootstrap wrappers from titles; repeated titles get a short session-id suffix in the overview.
 - Three views over the same evidence: **Conversation / Trajectory / Raw**.
-- Running traces can be manually re-read with **Refresh trace**; no background polling is used.
+- Running traces can be manually re-read with **Refresh trace**; the live update path is event-driven rather than fixed-interval polling.
+- An open trace watches only its own file for changes; **Auto** can follow new records, while the default mode shows a lightweight refresh notice.
 - Compact Conversation mode groups system/tool/reasoning traffic into collapsible Process blocks.
 - Expanded Process blocks keep their summary reachable while scrolling, so long blocks can be collapsed without returning to the top.
 - Long strings get **Rendered / Text / Raw / JSON** modes.
@@ -39,12 +40,16 @@ in the overview. Change the home under **Settings → Agent Trace Reader** if ne
 
 ```text
 Codex JSONL
-   ↓ source adapter
-Normalized events
+   ↓ src/sources/codex.js
+Normalized events / projections
    ├─ Conversation
    ├─ Trajectory
    └─ Raw
 ```
+
+The plugin entry and Obsidian views live in `src/main.js` and `src/views.js`;
+the source adapter is isolated so another trace format can be added without
+putting its parser inside the view layer.
 
 The normalization layer is presentation-only. Original records remain available, and malformed/unknown lines do not invalidate the rest of a session.
 
@@ -57,6 +62,7 @@ The normalization layer is presentation-only. Original records remain available,
 - Refreshing a trace re-reads the current file snapshot, so newly appended complete lines become available without copying the trace into the vault.
 - Trajectory and Raw use paged rendering, and compact Conversation keeps Process bodies collapsed until opened.
 - Copying an event or Process hydrates only when the action is invoked; Raw offers a bounded **Copy loaded** action.
+- Process copying uses asynchronous batched reads, so large tool/reasoning blocks do not synchronously open and close one file descriptor per event.
 - Markdown rendering is bounded for very large strings.
 - Generic JSONL rendering is capped at 1000 records.
 
@@ -71,9 +77,13 @@ not used as session titles; review envelopes may use their embedded `[n] user:` 
 For a local syntax/fixture check (Node 18+):
 
 ```sh
-node --check main.js
-node --test test/parse.test.js
+npm ci
+npm run check
 ```
+
+The repository keeps the source under `src/` and generates the root `main.js`
+artifact with esbuild. Releases still contain only `main.js`, `manifest.json`,
+and `styles.css`.
 
 ## Attribution
 

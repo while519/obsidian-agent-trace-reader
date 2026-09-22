@@ -1,6 +1,9 @@
 # Changelog
 
 ## Unreleased
+- Added per-trace file change detection with an explicit Auto-follow toggle; default change notices do not parse until Refresh is requested.
+- Batched large Process copy reads asynchronously through one open handle per source file.
+- Split the source into `src/sources/codex.js`, shared utilities, and views, with an esbuild-generated root artifact and CI build validation.
 - Made the session overview use the full pane width and added lightweight title/cwd/id/path/archive search over the loaded session list.
 - Filtered Codex bootstrap/runtime wrappers from the Conversation projection while retaining them in Trajectory and Raw; approval-review envelopes now show their embedded user request.
 - Added `CODEX_HOME`/`~/.codex` discovery for both active and archived sessions, with Archived overview markers.
