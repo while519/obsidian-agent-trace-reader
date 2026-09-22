@@ -1,0 +1,1 @@
+{"id":"agent-trace-reader","name":"Agent Trace Reader","version":"0.2.0","minAppVersion":"1.5.0","description":"Browse Codex sessions and read agent traces as conversation, trajectory, or raw JSON/JSONL. Local and read-only.","author":"Yu Wu","authorUrl":"https://github.com/while519","isDesktopOnly":true}
