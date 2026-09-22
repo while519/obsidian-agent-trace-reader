@@ -6,7 +6,7 @@ const test = require("node:test");
 const vm = require("node:vm");
 
 function loadInternals() {
-  const source = `${fs.readFileSync(path.join(__dirname, "..", "main.js"), "utf8")}\nthis.__agentTraceReaderInternals = { parseTrace, parseTraceFile, hydrateEvent, conversationEvents, isBootstrap, displaySessionTitle, scan, codexHomeFromLegacy };`;
+  const source = `${fs.readFileSync(path.join(__dirname, "..", "main.js"), "utf8")}\nthis.__agentTraceReaderInternals = { parseTrace, parseTraceFile, hydrateEvent, conversationEvents, isBootstrap, displaySessionTitle, scan, codexHomeFromLegacy, filterSessions };`;
   class Base {}
   class Setting {
     setName() { return this; }
@@ -203,4 +203,17 @@ test("discovers active and archived Codex rollouts under a Codex home", async ()
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
+});
+
+test("filters sessions by title, cwd, id, path, and archive state", () => {
+  const { filterSessions } = loadInternals();
+  const sessions = [
+    { title: "Deploy service", cwd: "/tmp/project", sessionId: "active-1", filePath: "/tmp/sessions/rollout-active.jsonl", fileName: "rollout-active.jsonl", archived: false },
+    { title: "Review history", cwd: "/tmp/archive", sessionId: "archived-2", filePath: "/tmp/archived_sessions/rollout-archived.jsonl", fileName: "rollout-archived.jsonl", archived: true },
+  ];
+  assert.deepEqual(filterSessions(sessions, "deploy"), [sessions[0]]);
+  assert.deepEqual(filterSessions(sessions, "/tmp/archive"), [sessions[1]]);
+  assert.deepEqual(filterSessions(sessions, "archived-2"), [sessions[1]]);
+  assert.deepEqual(filterSessions(sessions, "archived"), [sessions[1]]);
+  assert.deepEqual(filterSessions(sessions, ""), sessions);
 });

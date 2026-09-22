@@ -1,6 +1,7 @@
 # Changelog
 
 ## Unreleased
+- Made the session overview use the full pane width and added lightweight title/cwd/id/path/archive search over the loaded session list.
 - Filtered Codex bootstrap/runtime wrappers from the Conversation projection while retaining them in Trajectory and Raw; approval-review envelopes now show their embedded user request.
 - Added `CODEX_HOME`/`~/.codex` discovery for both active and archived sessions, with Archived overview markers.
 - Made CI run the parser/large-trace test suite and gated releases on an exact tag/manifest version match.

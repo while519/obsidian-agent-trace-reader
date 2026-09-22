@@ -6,6 +6,7 @@ A local-first, read-only reader for agent traces. v0.2 focuses on **Codex rollou
 
 - Auto-discovers Codex rollouts under `$CODEX_HOME` or `~/.codex`, including both `sessions/` and `archived_sessions/` (configurable).
 - Session browser grouped by recency; no symlink or copying into the vault.
+- Session overview searches the loaded sessions by title, cwd, id, archive state, or trace path.
 - Session overview uses separated, color-coded recency sections and readable cards.
 - Filters Codex runtime/bootstrap wrappers from titles; repeated titles get a short session-id suffix in the overview.
 - Three views over the same evidence: **Conversation / Trajectory / Raw**.

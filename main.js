@@ -124,6 +124,8 @@ class Sessions extends ItemView {
   constructor(leaf, plugin) {
     super(leaf);
     this.p = plugin;
+    this.sessions = null;
+    this.query = "";
   }
 
   getViewType() {
@@ -139,10 +141,10 @@ class Sessions extends ItemView {
   }
 
   async onOpen() {
-    await this.render();
+    await this.render(true);
   }
 
-  async render() {
+  async render(forceScan = false) {
     const rootEl = this.contentEl;
     rootEl.empty();
     rootEl.addClass("atr-sessions");
@@ -151,14 +153,25 @@ class Sessions extends ItemView {
     const heading = header.createDiv();
     heading.createEl("h2", { text: "Agent Sessions" });
     heading.createDiv({ cls: "atr-muted", text: "Codex · local, read-only" });
-    const refresh = btn(header, "refresh-cw", "Refresh");
-    refresh.onclick = () => this.render();
+    const tools = header.createDiv({ cls: "atr-session-tools" });
+    const search = tools.createEl("input", {
+      cls: "atr-session-search",
+      attr: {
+        type: "search",
+        placeholder: "Search title, cwd, id, or path",
+        "aria-label": "Search sessions",
+      },
+    });
+    search.value = this.query;
+    const refresh = btn(tools, "refresh-cw", "Refresh");
+    refresh.onclick = () => this.render(true);
 
     const root = home(this.p.settings.codexHomePath || DEFAULT_CODEX_HOME);
     const source = rootEl.createDiv({ cls: "atr-source" });
     source.createSpan({ text: root });
     copyButton(source, "Copy Codex home", () => root, { text: "Copy path" });
     if (!dir(root)) {
+      this.sessions = null;
       rootEl.createDiv({
         cls: "atr-empty-card",
         text: "Codex home not found. Set it in Settings → Agent Trace Reader.",
@@ -166,16 +179,35 @@ class Sessions extends ItemView {
       return;
     }
 
-    let sessions;
-    try {
-      sessions = await scan(root, this.p.settings.maxSessions);
-    } catch (error) {
-      rootEl.createDiv({ cls: "atr-error", text: `Scan failed: ${err(error)}` });
-      return;
+    let sessions = this.sessions;
+    if (forceScan || !sessions) {
+      try {
+        sessions = await scan(root, this.p.settings.maxSessions);
+        this.sessions = sessions;
+      } catch (error) {
+        this.sessions = null;
+        rootEl.createDiv({ cls: "atr-error", text: `Scan failed: ${err(error)}` });
+        return;
+      }
     }
 
+    const results = rootEl.createDiv({ cls: "atr-session-results" });
+    search.oninput = () => {
+      this.query = search.value;
+      this.renderResults(results, this.sessions || []);
+    };
+    this.renderResults(results, sessions);
+  }
+
+  renderResults(parent, sessions) {
+    parent.empty();
+    const filtered = filterSessions(sessions, this.query);
     if (!sessions.length) {
-      rootEl.createDiv({ cls: "atr-empty-card", text: "No rollout-*.jsonl files found." });
+      parent.createDiv({ cls: "atr-empty-card", text: "No rollout-*.jsonl files found." });
+      return;
+    }
+    if (!filtered.length) {
+      parent.createDiv({ cls: "atr-empty-card", text: `No sessions match “${this.query.trim()}”.` });
       return;
     }
 
@@ -186,9 +218,9 @@ class Sessions extends ItemView {
     }
 
     let sectionIndex = 0;
-    for (const [label, items] of groups(sessions)) {
+    for (const [label, items] of groups(filtered)) {
       const sectionClass = `atr-session-section atr-session-section-${label.toLowerCase()}${sectionIndex === 0 ? " atr-session-section-first" : ""}`;
-      const section = rootEl.createDiv({ cls: sectionClass });
+      const section = parent.createDiv({ cls: sectionClass });
       const sectionHeader = section.createDiv({ cls: "atr-session-section-header" });
       sectionHeader.createEl("h3", { text: label });
       sectionHeader.createSpan({
@@ -1196,6 +1228,19 @@ function groups(sessions) {
     grouped.get(label).push(session);
   }
   return grouped;
+}
+
+function filterSessions(sessions, query) {
+  const needle = String(query || "").trim().toLocaleLowerCase();
+  if (!needle) return sessions;
+  return sessions.filter((session) => [
+    session.title,
+    session.cwd,
+    session.sessionId,
+    session.filePath,
+    session.fileName,
+    session.archived ? "archived" : "active",
+  ].some((value) => String(value || "").toLocaleLowerCase().includes(needle)));
 }
 
 function btn(parent, icon, label) {

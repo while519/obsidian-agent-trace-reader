@@ -23,10 +23,6 @@
   margin-bottom: 14px;
 }
 
-.atr-sessions > .atr-header {
-  max-width: 1200px;
-}
-
 .atr-header h2,
 .atr-trace-header h2 {
   margin: 0;
@@ -50,7 +46,6 @@
   border: 1px solid var(--atr-border);
   border-radius: 8px;
   margin-bottom: 18px;
-  max-width: 1200px;
   padding: 9px 12px;
   overflow-wrap: anywhere;
 }
@@ -94,7 +89,6 @@
   --atr-section-accent: var(--interactive-accent);
   border-top: 2px solid var(--atr-section-accent);
   margin-top: 28px;
-  max-width: 1200px;
   padding-top: 11px;
 }
 
@@ -128,6 +122,30 @@
 .atr-session-count {
   color: var(--atr-muted);
   font-size: 0.78em;
+}
+
+.atr-session-tools {
+  align-items: center;
+  display: flex;
+  flex: 0 1 440px;
+  gap: 8px;
+  min-width: 0;
+}
+
+.atr-session-search {
+  background: var(--background-primary);
+  border: 1px solid var(--atr-border);
+  border-radius: 6px;
+  color: var(--text-normal);
+  flex: 1;
+  min-width: 0;
+  padding: 6px 9px;
+}
+
+.atr-session-search:focus {
+  border-color: var(--interactive-accent);
+  box-shadow: 0 0 0 2px var(--background-modifier-border-focus);
+  outline: none;
 }
 
 .atr-session-row {
@@ -661,6 +679,11 @@
   .atr-tabs {
     width: 100%;
     overflow: auto;
+  }
+
+  .atr-session-tools {
+    flex-basis: auto;
+    width: 100%;
   }
 
   .atr-trajectory-row > summary {
