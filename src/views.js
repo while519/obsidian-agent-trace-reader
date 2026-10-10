@@ -48,6 +48,8 @@ const {
   scan,
 } = source;
 
+const SESSION_PAGE_SIZE = 50;
+
 class Settings extends PluginSettingTab {
   constructor(app, plugin) {
     super(app, plugin);
@@ -75,7 +77,7 @@ class Settings extends PluginSettingTab {
 
     new Setting(el)
       .setName("Maximum sessions")
-      .setDesc("Limit the number of sessions shown after scanning the folder.")
+      .setDesc("Load up to this many recent sessions into the overview. The list is shown 50 at a time; increase this to include older traces, up to 5,000.")
       .addText((text) =>
         text.setValue(String(this.p.settings.maxSessions)).onChange(async (value) => {
           const next = parseInt(value, 10);
@@ -104,6 +106,8 @@ class Sessions extends ItemView {
     this.p = plugin;
     this.sessions = null;
     this.query = "";
+    this.currentPage = 0;
+    this.listMode = "all";
   }
 
   getViewType() {
@@ -136,13 +140,16 @@ class Sessions extends ItemView {
       cls: "atr-session-search",
       attr: {
         type: "search",
-        placeholder: "Search title, cwd, id, or path",
+        placeholder: this.listMode === "bookmarks" ? "Search bookmarks" : "Search title, cwd, id, or path",
         "aria-label": "Search sessions",
       },
     });
     search.value = this.query;
     const refresh = btn(tools, "refresh-cw", "Refresh");
-    refresh.onclick = () => this.render(true);
+    refresh.onclick = () => {
+      this.currentPage = 0;
+      this.render(true);
+    };
 
     const root = home(this.p.settings.codexHomePath || DEFAULT_CODEX_HOME);
     const source = rootEl.createDiv({ cls: "atr-source" });
@@ -160,7 +167,8 @@ class Sessions extends ItemView {
     let sessions = this.sessions;
     if (forceScan || !sessions) {
       try {
-        sessions = await scan(root, this.p.settings.maxSessions);
+        sessions = await scan(root, this.p.settings.maxSessions, this.p.settings.bookmarks);
+        await reconcileBookmarks(this.p, sessions);
         this.sessions = sessions;
       } catch (error) {
         this.sessions = null;
@@ -169,9 +177,30 @@ class Sessions extends ItemView {
       }
     }
 
+    const modeBar = rootEl.createDiv({ cls: "atr-session-modes", attr: { role: "tablist", "aria-label": "Session list" } });
+    for (const [mode, label] of [["all", "All sessions"], ["bookmarks", "Bookmarks"]]) {
+      const tab = modeBar.createEl("button", {
+        cls: `atr-mode-tab${this.listMode === mode ? " is-active" : ""}`,
+        text: label,
+        attr: { type: "button", role: "tab", "aria-selected": String(this.listMode === mode) },
+      });
+      tab.onclick = () => {
+        this.listMode = mode;
+        this.currentPage = 0;
+        search.placeholder = mode === "bookmarks" ? "Search bookmarks" : "Search title, cwd, id, or path";
+        modeBar.querySelectorAll(".atr-mode-tab").forEach((item) => {
+          const active = item === tab;
+          item.toggleClass("is-active", active);
+          item.setAttribute("aria-selected", String(active));
+        });
+        this.renderResults(results, this.sessions || []);
+      };
+    }
+
     const results = rootEl.createDiv({ cls: "atr-session-results" });
     search.oninput = () => {
       this.query = search.value;
+      this.currentPage = 0;
       this.renderResults(results, this.sessions || []);
     };
     this.renderResults(results, sessions);
@@ -179,8 +208,16 @@ class Sessions extends ItemView {
 
   renderResults(parent, sessions) {
     parent.empty();
-    const filtered = filterSessions(sessions, this.query);
-    if (!sessions.length) {
+    const bookmarks = this.p.settings.bookmarks || [];
+    const available = this.listMode === "bookmarks"
+      ? resolveBookmarkSessions(sessions, bookmarks)
+      : sessions.filter((session) => !session.bookmarkOnly);
+    const filtered = filterSessions(available, this.query);
+    if (this.listMode === "bookmarks" && !available.length) {
+      parent.createDiv({ cls: "atr-empty-card", text: "No bookmarked sessions yet. Use the star on a session to save it here." });
+      return;
+    }
+    if (this.listMode === "all" && !available.length) {
       parent.createDiv({ cls: "atr-empty-card", text: "No rollout-*.jsonl files found." });
       return;
     }
@@ -189,14 +226,20 @@ class Sessions extends ItemView {
       return;
     }
 
+    const pageCount = Math.ceil(filtered.length / SESSION_PAGE_SIZE);
+    this.currentPage = Math.min(this.currentPage, pageCount - 1);
+    const start = this.currentPage * SESSION_PAGE_SIZE;
+    const pageSessions = filtered.slice(start, start + SESSION_PAGE_SIZE);
+    this.renderPagination(parent, start, Math.min(start + pageSessions.length, filtered.length), filtered.length, pageCount, available);
+
     const titleCounts = new Map();
-    for (const session of sessions) {
+    for (const session of available) {
       const title = session.title || "Untitled session";
       titleCounts.set(title, (titleCounts.get(title) || 0) + 1);
     }
 
     let sectionIndex = 0;
-    for (const [label, items] of groups(filtered)) {
+    for (const [label, items] of groups(pageSessions)) {
       const sectionClass = `atr-session-section atr-session-section-${label.toLowerCase()}${sectionIndex === 0 ? " atr-session-section-first" : ""}`;
       const section = parent.createDiv({ cls: sectionClass });
       const sectionHeader = section.createDiv({ cls: "atr-session-section-header" });
@@ -208,21 +251,56 @@ class Sessions extends ItemView {
       for (const session of items) {
         const row = section.createDiv({ cls: "atr-session-row" });
         const cardEl = row.createEl("button", {
-          cls: "atr-session-card",
+          cls: `atr-session-card${session.missing ? " is-missing" : ""}`,
           attr: { type: "button" },
         });
+        cardEl.disabled = Boolean(session.missing);
         const title = displaySessionTitle(session, titleCounts);
         cardEl.createDiv({ cls: "atr-session-title", text: title });
         const meta = cardEl.createDiv({ cls: "atr-session-meta" });
-        meta.createSpan({ cls: "atr-session-date", text: fmt(session.modifiedMs) });
+        meta.createSpan({ cls: "atr-session-date", text: session.missing ? "Trace file not found" : fmt(session.modifiedMs) });
         if (session.archived) meta.createSpan({ cls: "atr-session-archived", text: "Archived" });
         if (session.cwd) meta.createSpan({ cls: "atr-session-cwd", text: session.cwd });
         if (session.sessionId) meta.createSpan({ cls: "atr-session-id", text: short(session.sessionId) });
-        cardEl.onclick = () => this.p.openTrace(session.filePath);
+        if (!session.missing) cardEl.onclick = () => this.p.openTrace(session.filePath);
+        bookmarkButton(row, this.p, session, () => this.renderResults(parent, this.sessions || []));
         copyButton(row, "Copy trace path", () => session.filePath);
       }
       sectionIndex += 1;
     }
+
+    this.renderPagination(parent, start, Math.min(start + pageSessions.length, filtered.length), filtered.length, pageCount, available);
+  }
+
+  renderPagination(parent, start, end, total, pageCount, sessions) {
+    const nav = parent.createDiv({ cls: "atr-pagination", attr: { role: "navigation", "aria-label": "Session pages" } });
+    const previous = nav.createEl("button", {
+      cls: "atr-page-button",
+      text: "‹ Previous",
+      attr: { type: "button" },
+    });
+    previous.disabled = this.currentPage === 0;
+    previous.onclick = () => {
+      this.currentPage -= 1;
+      this.renderResults(parent, sessions);
+    };
+
+    nav.createSpan({
+      cls: "atr-page-status",
+      text: `${(start + 1).toLocaleString()}–${end.toLocaleString()} of ${total.toLocaleString()} · Page ${(this.currentPage + 1).toLocaleString()} of ${pageCount.toLocaleString()}`,
+      attr: { "aria-live": "polite" },
+    });
+
+    const next = nav.createEl("button", {
+      cls: "atr-page-button",
+      text: "Next ›",
+      attr: { type: "button" },
+    });
+    next.disabled = this.currentPage >= pageCount - 1;
+    next.onclick = () => {
+      this.currentPage += 1;
+      this.renderResults(parent, sessions);
+    };
   }
 }
 
@@ -316,6 +394,30 @@ class Trace extends ItemView {
     copyButton(meta, "Copy trace path", () => this.filePath);
 
     const controls = header.createDiv({ cls: "atr-trace-controls" });
+    const traceBookmark = {
+      sessionId: trace.sessionId,
+      filePath: this.filePath,
+      fileName: basename(this.filePath),
+      title: trace.title,
+      cwd: trace.cwd,
+      modifiedMs: trace.modifiedMs,
+    };
+    const bookmarked = isBookmarked(this.p.settings.bookmarks || [], traceBookmark);
+    const bookmark = btn(controls, "star", bookmarked ? "Remove bookmark" : "Bookmark session");
+    bookmark.addClass("atr-bookmark-toggle");
+    bookmark.toggleClass("is-active", bookmarked);
+    bookmark.setAttribute("aria-pressed", String(bookmarked));
+    bookmark.onclick = async (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      const next = await toggleBookmark(this.p, traceBookmark);
+      bookmark.toggleClass("is-active", next);
+      bookmark.title = next ? "Remove bookmark" : "Bookmark session";
+      bookmark.setAttribute("aria-label", bookmark.title);
+      bookmark.setAttribute("aria-pressed", String(next));
+      await refreshSessionViews(this.p);
+    };
+
     const refresh = btn(controls, "refresh-cw", "Refresh trace");
     refresh.disabled = this.loading;
     refresh.onclick = () => this.load();
@@ -530,6 +632,94 @@ class JsonView extends TextFileView {
       rootEl.createEl("pre", { text: this.data });
     }
   }
+}
+
+function bookmarkButton(parent, plugin, session, onChanged) {
+  const bookmarked = isBookmarked(plugin.settings.bookmarks || [], session);
+  const button = parent.createEl("button", {
+    cls: `clickable-icon atr-bookmark-button${bookmarked ? " is-active" : ""}`,
+    attr: {
+      type: "button",
+      title: bookmarked ? "Remove bookmark" : "Bookmark session",
+      "aria-label": bookmarked ? "Remove bookmark" : "Bookmark session",
+      "aria-pressed": String(bookmarked),
+    },
+  });
+  setIcon(button, "star");
+  button.onclick = async (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    await toggleBookmark(plugin, session);
+    onChanged?.();
+  };
+  return button;
+}
+
+function isBookmarked(bookmarks, session) {
+  return bookmarks.some((bookmark) => bookmarkMatches(bookmark, session));
+}
+
+function bookmarkMatches(a, b) {
+  if (a.sessionId && b.sessionId) return a.sessionId === b.sessionId;
+  if (a.fileName && b.fileName && a.fileName === b.fileName) return true;
+  return Boolean(a.filePath && b.filePath && a.filePath === b.filePath);
+}
+
+async function toggleBookmark(plugin, session) {
+  const bookmarks = plugin.settings.bookmarks || (plugin.settings.bookmarks = []);
+  const index = bookmarks.findIndex((bookmark) => bookmarkMatches(bookmark, session));
+  if (index >= 0) {
+    bookmarks.splice(index, 1);
+    await plugin.save();
+    return false;
+  }
+  bookmarks.push({
+    sessionId: session.sessionId,
+    filePath: session.filePath,
+    fileName: session.fileName || basename(session.filePath),
+    title: session.title,
+    cwd: session.cwd,
+    archived: session.archived === true,
+    modifiedMs: session.modifiedMs,
+    bookmarkedAt: Date.now(),
+  });
+  await plugin.save();
+  return true;
+}
+
+function resolveBookmarkSessions(sessions, bookmarks) {
+  return bookmarks.map((bookmark) => {
+    const session = sessions.find((item) => bookmarkMatches(bookmark, item));
+    if (session) return { ...session, missing: false };
+    return {
+      ...bookmark,
+      title: bookmark.title || "Unavailable session",
+      modifiedMs: bookmark.modifiedMs || bookmark.bookmarkedAt,
+      missing: true,
+    };
+  }).sort((a, b) => (b.modifiedMs || 0) - (a.modifiedMs || 0));
+}
+
+async function reconcileBookmarks(plugin, sessions) {
+  let changed = false;
+  for (const bookmark of plugin.settings.bookmarks || []) {
+    const session = sessions.find((item) => bookmarkMatches(bookmark, item));
+    if (!session) continue;
+    for (const key of ["sessionId", "filePath", "fileName", "title", "cwd", "archived", "modifiedMs"]) {
+      if (session[key] !== undefined && bookmark[key] !== session[key]) {
+        bookmark[key] = session[key];
+        changed = true;
+      }
+    }
+  }
+  if (changed) await plugin.save();
+}
+
+async function refreshSessionViews(plugin) {
+  const views = plugin.app.workspace.getLeavesOfType(VS)
+    .map((leaf) => leaf.view)
+    .filter((view) => view && typeof view.render === "function");
+  await Promise.all(views.map((view) => view.render(true)));
 }
 
 function processBlock(parent, events, comp, compact) {

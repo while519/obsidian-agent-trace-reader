@@ -132,6 +132,57 @@
   min-width: 0;
 }
 
+.atr-session-modes {
+  border-bottom: 1px solid var(--atr-border);
+  display: flex;
+  gap: 4px;
+  margin: 0 0 14px;
+}
+
+.atr-mode-tab {
+  background: transparent;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  color: var(--atr-muted);
+  padding: 7px 10px;
+}
+
+.atr-mode-tab.is-active {
+  border-bottom-color: var(--interactive-accent);
+  color: var(--text-accent);
+}
+
+.atr-pagination {
+  align-items: center;
+  display: flex;
+  gap: 10px;
+  justify-content: center;
+  margin: 14px 0;
+}
+
+.atr-page-button {
+  background: var(--background-secondary);
+  border: 1px solid var(--atr-border);
+  border-radius: 6px;
+  color: var(--text-normal);
+  padding: 5px 10px;
+}
+
+.atr-page-button:hover:not(:disabled) {
+  border-color: var(--interactive-accent);
+}
+
+.atr-page-button:disabled {
+  cursor: default;
+  opacity: 0.45;
+}
+
+.atr-page-status {
+  color: var(--atr-muted);
+  font-size: 0.85em;
+  text-align: center;
+}
+
 .atr-session-search {
   background: var(--background-primary);
   border: 1px solid var(--atr-border);
@@ -158,6 +209,25 @@
   margin-top: 8px;
 }
 
+.atr-bookmark-button {
+  align-self: center;
+  border-radius: 6px;
+  color: var(--text-muted);
+  flex: 0 0 auto;
+  height: 34px;
+  width: 34px;
+}
+
+.atr-bookmark-button:hover,
+.atr-bookmark-button.is-active {
+  color: var(--text-accent);
+}
+
+.atr-bookmark-button.is-active svg,
+.atr-bookmark-toggle.is-active svg {
+  fill: currentColor;
+}
+
 .atr-session-card {
   background: var(--atr-session-card);
   border: 1px solid var(--atr-border);
@@ -175,6 +245,12 @@
 .atr-session-card:focus-visible {
   background: var(--atr-session-card-hover);
   border-color: var(--atr-section-accent);
+}
+
+.atr-session-card.is-missing,
+.atr-session-card.is-missing:hover {
+  cursor: not-allowed;
+  opacity: 0.65;
 }
 
 .atr-session-title {
@@ -298,6 +374,10 @@
 
 .atr-follow-toggle.is-active {
   background: var(--background-modifier-hover);
+  color: var(--text-accent);
+}
+
+.atr-bookmark-toggle.is-active {
   color: var(--text-accent);
 }
 

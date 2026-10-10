@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+- Paginated the session overview in 50-item pages; search results keep their page navigation, and the configured session limit controls how far back the list can browse.
+- Added session bookmarks from the overview and trace header, with a dedicated searchable list and path refresh across active/archive moves.
+
 ## 0.2.0 - 2026-09-22
 - Added per-trace file change detection with an explicit Auto-follow toggle; default change notices do not parse until Refresh is requested.
 - Batched large Process copy reads asynchronously through one open handle per source file.

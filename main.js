@@ -25,7 +25,8 @@ var require_shared = __commonJS({
     var DEF2 = {
       codexHomePath: DEFAULT_CODEX_HOME,
       maxSessions: 300,
-      compactConversation: true
+      compactConversation: true,
+      bookmarks: []
     };
     function obj(value) {
       return value && typeof value === "object" && !Array.isArray(value);
@@ -613,15 +614,23 @@ var require_codex = __commonJS({
       }
       return buffer.toString("utf8", 0, total);
     }
-    async function scan(root, limit) {
+    async function scan(root, limit, bookmarks = []) {
       const found = [];
       collectRollouts(path.join(root, "sessions"), false, found);
       collectRollouts(path.join(root, "archived_sessions"), true, found);
       collectDirectRollouts(root, found);
       found.sort((a, b) => b.modifiedMs - a.modifiedMs);
-      const selected = found.slice(0, limit);
+      const recent = found.slice(0, limit);
+      const selected = new Map(recent.map((session) => [session.filePath, { ...session, bookmarkOnly: false }]));
+      for (const bookmark of bookmarks) {
+        const match = found.find((session) => session.filePath === bookmark.filePath) || found.find((session) => bookmark.fileName && session.fileName === bookmark.fileName) || found.find((session) => bookmark.sessionId && session.fileName.toLowerCase().endsWith(`-${bookmark.sessionId.toLowerCase()}.jsonl`));
+        if (match && !selected.has(match.filePath)) {
+          selected.set(match.filePath, { ...match, bookmarkOnly: true });
+        }
+      }
       const sessions = [];
-      for (const session of selected) sessions.push(await enrich(session));
+      for (const session of selected.values()) sessions.push(await enrich(session));
+      sessions.sort((a, b) => b.modifiedMs - a.modifiedMs);
       return sessions;
     }
     function collectRollouts(root, archived, found) {
@@ -799,6 +808,7 @@ var require_views = __commonJS({
       readLineRef,
       scan
     } = source;
+    var SESSION_PAGE_SIZE = 50;
     var Settings2 = class extends PluginSettingTab {
       constructor(app, plugin) {
         super(app, plugin);
@@ -816,7 +826,7 @@ var require_views = __commonJS({
             await this.p.save();
           })
         );
-        new Setting(el).setName("Maximum sessions").setDesc("Limit the number of sessions shown after scanning the folder.").addText(
+        new Setting(el).setName("Maximum sessions").setDesc("Load up to this many recent sessions into the overview. The list is shown 50 at a time; increase this to include older traces, up to 5,000.").addText(
           (text) => text.setValue(String(this.p.settings.maxSessions)).onChange(async (value) => {
             const next = parseInt(value, 10);
             if (next > 0) {
@@ -839,6 +849,8 @@ var require_views = __commonJS({
         this.p = plugin;
         this.sessions = null;
         this.query = "";
+        this.currentPage = 0;
+        this.listMode = "all";
       }
       getViewType() {
         return VS2;
@@ -865,13 +877,16 @@ var require_views = __commonJS({
           cls: "atr-session-search",
           attr: {
             type: "search",
-            placeholder: "Search title, cwd, id, or path",
+            placeholder: this.listMode === "bookmarks" ? "Search bookmarks" : "Search title, cwd, id, or path",
             "aria-label": "Search sessions"
           }
         });
         search.value = this.query;
         const refresh = btn(tools, "refresh-cw", "Refresh");
-        refresh.onclick = () => this.render(true);
+        refresh.onclick = () => {
+          this.currentPage = 0;
+          this.render(true);
+        };
         const root = home(this.p.settings.codexHomePath || DEFAULT_CODEX_HOME);
         const source2 = rootEl.createDiv({ cls: "atr-source" });
         source2.createSpan({ text: root });
@@ -887,7 +902,8 @@ var require_views = __commonJS({
         let sessions = this.sessions;
         if (forceScan || !sessions) {
           try {
-            sessions = await scan(root, this.p.settings.maxSessions);
+            sessions = await scan(root, this.p.settings.maxSessions, this.p.settings.bookmarks);
+            await reconcileBookmarks(this.p, sessions);
             this.sessions = sessions;
           } catch (error) {
             this.sessions = null;
@@ -895,17 +911,43 @@ var require_views = __commonJS({
             return;
           }
         }
+        const modeBar = rootEl.createDiv({ cls: "atr-session-modes", attr: { role: "tablist", "aria-label": "Session list" } });
+        for (const [mode, label] of [["all", "All sessions"], ["bookmarks", "Bookmarks"]]) {
+          const tab = modeBar.createEl("button", {
+            cls: `atr-mode-tab${this.listMode === mode ? " is-active" : ""}`,
+            text: label,
+            attr: { type: "button", role: "tab", "aria-selected": String(this.listMode === mode) }
+          });
+          tab.onclick = () => {
+            this.listMode = mode;
+            this.currentPage = 0;
+            search.placeholder = mode === "bookmarks" ? "Search bookmarks" : "Search title, cwd, id, or path";
+            modeBar.querySelectorAll(".atr-mode-tab").forEach((item) => {
+              const active = item === tab;
+              item.toggleClass("is-active", active);
+              item.setAttribute("aria-selected", String(active));
+            });
+            this.renderResults(results, this.sessions || []);
+          };
+        }
         const results = rootEl.createDiv({ cls: "atr-session-results" });
         search.oninput = () => {
           this.query = search.value;
+          this.currentPage = 0;
           this.renderResults(results, this.sessions || []);
         };
         this.renderResults(results, sessions);
       }
       renderResults(parent, sessions) {
         parent.empty();
-        const filtered = filterSessions(sessions, this.query);
-        if (!sessions.length) {
+        const bookmarks = this.p.settings.bookmarks || [];
+        const available = this.listMode === "bookmarks" ? resolveBookmarkSessions(sessions, bookmarks) : sessions.filter((session) => !session.bookmarkOnly);
+        const filtered = filterSessions(available, this.query);
+        if (this.listMode === "bookmarks" && !available.length) {
+          parent.createDiv({ cls: "atr-empty-card", text: "No bookmarked sessions yet. Use the star on a session to save it here." });
+          return;
+        }
+        if (this.listMode === "all" && !available.length) {
           parent.createDiv({ cls: "atr-empty-card", text: "No rollout-*.jsonl files found." });
           return;
         }
@@ -913,13 +955,18 @@ var require_views = __commonJS({
           parent.createDiv({ cls: "atr-empty-card", text: `No sessions match \u201C${this.query.trim()}\u201D.` });
           return;
         }
+        const pageCount = Math.ceil(filtered.length / SESSION_PAGE_SIZE);
+        this.currentPage = Math.min(this.currentPage, pageCount - 1);
+        const start = this.currentPage * SESSION_PAGE_SIZE;
+        const pageSessions = filtered.slice(start, start + SESSION_PAGE_SIZE);
+        this.renderPagination(parent, start, Math.min(start + pageSessions.length, filtered.length), filtered.length, pageCount, available);
         const titleCounts = /* @__PURE__ */ new Map();
-        for (const session of sessions) {
+        for (const session of available) {
           const title = session.title || "Untitled session";
           titleCounts.set(title, (titleCounts.get(title) || 0) + 1);
         }
         let sectionIndex = 0;
-        for (const [label, items] of groups(filtered)) {
+        for (const [label, items] of groups(pageSessions)) {
           const sectionClass = `atr-session-section atr-session-section-${label.toLowerCase()}${sectionIndex === 0 ? " atr-session-section-first" : ""}`;
           const section = parent.createDiv({ cls: sectionClass });
           const sectionHeader = section.createDiv({ cls: "atr-session-section-header" });
@@ -931,21 +978,52 @@ var require_views = __commonJS({
           for (const session of items) {
             const row = section.createDiv({ cls: "atr-session-row" });
             const cardEl = row.createEl("button", {
-              cls: "atr-session-card",
+              cls: `atr-session-card${session.missing ? " is-missing" : ""}`,
               attr: { type: "button" }
             });
+            cardEl.disabled = Boolean(session.missing);
             const title = displaySessionTitle(session, titleCounts);
             cardEl.createDiv({ cls: "atr-session-title", text: title });
             const meta = cardEl.createDiv({ cls: "atr-session-meta" });
-            meta.createSpan({ cls: "atr-session-date", text: fmt(session.modifiedMs) });
+            meta.createSpan({ cls: "atr-session-date", text: session.missing ? "Trace file not found" : fmt(session.modifiedMs) });
             if (session.archived) meta.createSpan({ cls: "atr-session-archived", text: "Archived" });
             if (session.cwd) meta.createSpan({ cls: "atr-session-cwd", text: session.cwd });
             if (session.sessionId) meta.createSpan({ cls: "atr-session-id", text: short(session.sessionId) });
-            cardEl.onclick = () => this.p.openTrace(session.filePath);
+            if (!session.missing) cardEl.onclick = () => this.p.openTrace(session.filePath);
+            bookmarkButton(row, this.p, session, () => this.renderResults(parent, this.sessions || []));
             copyButton(row, "Copy trace path", () => session.filePath);
           }
           sectionIndex += 1;
         }
+        this.renderPagination(parent, start, Math.min(start + pageSessions.length, filtered.length), filtered.length, pageCount, available);
+      }
+      renderPagination(parent, start, end, total, pageCount, sessions) {
+        const nav = parent.createDiv({ cls: "atr-pagination", attr: { role: "navigation", "aria-label": "Session pages" } });
+        const previous = nav.createEl("button", {
+          cls: "atr-page-button",
+          text: "\u2039 Previous",
+          attr: { type: "button" }
+        });
+        previous.disabled = this.currentPage === 0;
+        previous.onclick = () => {
+          this.currentPage -= 1;
+          this.renderResults(parent, sessions);
+        };
+        nav.createSpan({
+          cls: "atr-page-status",
+          text: `${(start + 1).toLocaleString()}\u2013${end.toLocaleString()} of ${total.toLocaleString()} \xB7 Page ${(this.currentPage + 1).toLocaleString()} of ${pageCount.toLocaleString()}`,
+          attr: { "aria-live": "polite" }
+        });
+        const next = nav.createEl("button", {
+          cls: "atr-page-button",
+          text: "Next \u203A",
+          attr: { type: "button" }
+        });
+        next.disabled = this.currentPage >= pageCount - 1;
+        next.onclick = () => {
+          this.currentPage += 1;
+          this.renderResults(parent, sessions);
+        };
       }
     };
     var Trace2 = class extends ItemView {
@@ -1026,6 +1104,29 @@ var require_views = __commonJS({
         if (trace.isLarge) meta.createSpan({ text: `${formatBytes(trace.fileSize)} \xB7 streamed` });
         copyButton(meta, "Copy trace path", () => this.filePath);
         const controls = header.createDiv({ cls: "atr-trace-controls" });
+        const traceBookmark = {
+          sessionId: trace.sessionId,
+          filePath: this.filePath,
+          fileName: basename(this.filePath),
+          title: trace.title,
+          cwd: trace.cwd,
+          modifiedMs: trace.modifiedMs
+        };
+        const bookmarked = isBookmarked(this.p.settings.bookmarks || [], traceBookmark);
+        const bookmark = btn(controls, "star", bookmarked ? "Remove bookmark" : "Bookmark session");
+        bookmark.addClass("atr-bookmark-toggle");
+        bookmark.toggleClass("is-active", bookmarked);
+        bookmark.setAttribute("aria-pressed", String(bookmarked));
+        bookmark.onclick = async (event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          const next = await toggleBookmark(this.p, traceBookmark);
+          bookmark.toggleClass("is-active", next);
+          bookmark.title = next ? "Remove bookmark" : "Bookmark session";
+          bookmark.setAttribute("aria-label", bookmark.title);
+          bookmark.setAttribute("aria-pressed", String(next));
+          await refreshSessionViews(this.p);
+        };
         const refresh = btn(controls, "refresh-cw", "Refresh trace");
         refresh.disabled = this.loading;
         refresh.onclick = () => this.load();
@@ -1219,6 +1320,85 @@ var require_views = __commonJS({
         }
       }
     };
+    function bookmarkButton(parent, plugin, session, onChanged) {
+      const bookmarked = isBookmarked(plugin.settings.bookmarks || [], session);
+      const button = parent.createEl("button", {
+        cls: `clickable-icon atr-bookmark-button${bookmarked ? " is-active" : ""}`,
+        attr: {
+          type: "button",
+          title: bookmarked ? "Remove bookmark" : "Bookmark session",
+          "aria-label": bookmarked ? "Remove bookmark" : "Bookmark session",
+          "aria-pressed": String(bookmarked)
+        }
+      });
+      setIcon(button, "star");
+      button.onclick = async (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        await toggleBookmark(plugin, session);
+        onChanged?.();
+      };
+      return button;
+    }
+    function isBookmarked(bookmarks, session) {
+      return bookmarks.some((bookmark) => bookmarkMatches(bookmark, session));
+    }
+    function bookmarkMatches(a, b) {
+      if (a.sessionId && b.sessionId) return a.sessionId === b.sessionId;
+      if (a.fileName && b.fileName && a.fileName === b.fileName) return true;
+      return Boolean(a.filePath && b.filePath && a.filePath === b.filePath);
+    }
+    async function toggleBookmark(plugin, session) {
+      const bookmarks = plugin.settings.bookmarks || (plugin.settings.bookmarks = []);
+      const index = bookmarks.findIndex((bookmark) => bookmarkMatches(bookmark, session));
+      if (index >= 0) {
+        bookmarks.splice(index, 1);
+        await plugin.save();
+        return false;
+      }
+      bookmarks.push({
+        sessionId: session.sessionId,
+        filePath: session.filePath,
+        fileName: session.fileName || basename(session.filePath),
+        title: session.title,
+        cwd: session.cwd,
+        archived: session.archived === true,
+        modifiedMs: session.modifiedMs,
+        bookmarkedAt: Date.now()
+      });
+      await plugin.save();
+      return true;
+    }
+    function resolveBookmarkSessions(sessions, bookmarks) {
+      return bookmarks.map((bookmark) => {
+        const session = sessions.find((item) => bookmarkMatches(bookmark, item));
+        if (session) return { ...session, missing: false };
+        return {
+          ...bookmark,
+          title: bookmark.title || "Unavailable session",
+          modifiedMs: bookmark.modifiedMs || bookmark.bookmarkedAt,
+          missing: true
+        };
+      }).sort((a, b) => (b.modifiedMs || 0) - (a.modifiedMs || 0));
+    }
+    async function reconcileBookmarks(plugin, sessions) {
+      let changed = false;
+      for (const bookmark of plugin.settings.bookmarks || []) {
+        const session = sessions.find((item) => bookmarkMatches(bookmark, item));
+        if (!session) continue;
+        for (const key of ["sessionId", "filePath", "fileName", "title", "cwd", "archived", "modifiedMs"]) {
+          if (session[key] !== void 0 && bookmark[key] !== session[key]) {
+            bookmark[key] = session[key];
+            changed = true;
+          }
+        }
+      }
+      if (changed) await plugin.save();
+    }
+    async function refreshSessionViews(plugin) {
+      const views = plugin.app.workspace.getLeavesOfType(VS2).map((leaf) => leaf.view).filter((view) => view && typeof view.render === "function");
+      await Promise.all(views.map((view) => view.render(true)));
+    }
     function processBlock(parent, events, comp, compact) {
       const details = parent.createEl("details", { cls: "atr-process" });
       if (!compact) details.open = true;
@@ -1533,6 +1713,7 @@ var AgentTraceReaderPlugin = class extends Plugin {
   async onload() {
     const saved = await this.loadData() || {};
     this.settings = { ...DEF, ...saved };
+    this.settings.bookmarks = normalizeBookmarks(saved.bookmarks);
     if (!saved.codexHomePath && saved.codexSessionsPath) {
       this.settings.codexHomePath = codexHomeFromLegacy(saved.codexSessionsPath);
     }
@@ -1562,4 +1743,28 @@ var AgentTraceReaderPlugin = class extends Plugin {
     this.app.workspace.revealLeaf(leaf);
   }
 };
+function normalizeBookmarks(value) {
+  if (!Array.isArray(value)) return [];
+  const bookmarks = [];
+  for (const item of value) {
+    if (!item || typeof item !== "object") continue;
+    const bookmark = {
+      sessionId: typeof item.sessionId === "string" ? item.sessionId : void 0,
+      filePath: typeof item.filePath === "string" ? item.filePath : void 0,
+      fileName: typeof item.fileName === "string" ? item.fileName : void 0,
+      title: typeof item.title === "string" ? item.title : void 0,
+      cwd: typeof item.cwd === "string" ? item.cwd : void 0,
+      archived: item.archived === true,
+      modifiedMs: Number.isFinite(item.modifiedMs) ? item.modifiedMs : void 0,
+      bookmarkedAt: Number.isFinite(item.bookmarkedAt) ? item.bookmarkedAt : Date.now()
+    };
+    if (!bookmark.sessionId && !bookmark.filePath && !bookmark.fileName) continue;
+    const duplicate = bookmarks.some((saved) => {
+      if (bookmark.sessionId && saved.sessionId) return saved.sessionId === bookmark.sessionId;
+      return Boolean(bookmark.fileName && saved.fileName === bookmark.fileName || bookmark.filePath && saved.filePath === bookmark.filePath);
+    });
+    if (!duplicate) bookmarks.push(bookmark);
+  }
+  return bookmarks;
+}
 module.exports = AgentTraceReaderPlugin;

@@ -19,6 +19,7 @@ const DEF = {
   codexHomePath: DEFAULT_CODEX_HOME,
   maxSessions: 300,
   compactConversation: true,
+  bookmarks: [],
 };
 
 function obj(value) {

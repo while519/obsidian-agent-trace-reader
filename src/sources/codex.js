@@ -448,15 +448,28 @@ async function readLineRefAsync(ref, handle) {
   return buffer.toString("utf8", 0, total);
 }
 
-async function scan(root, limit) {
+async function scan(root, limit, bookmarks = []) {
   const found = [];
   collectRollouts(path.join(root, "sessions"), false, found);
   collectRollouts(path.join(root, "archived_sessions"), true, found);
   collectDirectRollouts(root, found);
   found.sort((a, b) => b.modifiedMs - a.modifiedMs);
-  const selected = found.slice(0, limit);
+  const recent = found.slice(0, limit);
+  const selected = new Map(recent.map((session) => [session.filePath, { ...session, bookmarkOnly: false }]));
+
+  for (const bookmark of bookmarks) {
+    const match = found.find((session) => session.filePath === bookmark.filePath)
+      || found.find((session) => bookmark.fileName && session.fileName === bookmark.fileName)
+      || found.find((session) => bookmark.sessionId
+        && session.fileName.toLowerCase().endsWith(`-${bookmark.sessionId.toLowerCase()}.jsonl`));
+    if (match && !selected.has(match.filePath)) {
+      selected.set(match.filePath, { ...match, bookmarkOnly: true });
+    }
+  }
+
   const sessions = [];
-  for (const session of selected) sessions.push(await enrich(session));
+  for (const session of selected.values()) sessions.push(await enrich(session));
+  sessions.sort((a, b) => b.modifiedMs - a.modifiedMs);
   return sessions;
 }
 

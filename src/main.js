@@ -6,6 +6,7 @@ class AgentTraceReaderPlugin extends Plugin {
   async onload() {
     const saved = (await this.loadData()) || {};
     this.settings = { ...DEF, ...saved };
+    this.settings.bookmarks = normalizeBookmarks(saved.bookmarks);
     if (!saved.codexHomePath && saved.codexSessionsPath) {
       this.settings.codexHomePath = codexHomeFromLegacy(saved.codexSessionsPath);
     }
@@ -37,6 +38,32 @@ class AgentTraceReaderPlugin extends Plugin {
     await leaf.setViewState({ type: VT, active: true, state: { filePath } });
     this.app.workspace.revealLeaf(leaf);
   }
+}
+
+function normalizeBookmarks(value) {
+  if (!Array.isArray(value)) return [];
+  const bookmarks = [];
+  for (const item of value) {
+    if (!item || typeof item !== "object") continue;
+    const bookmark = {
+      sessionId: typeof item.sessionId === "string" ? item.sessionId : undefined,
+      filePath: typeof item.filePath === "string" ? item.filePath : undefined,
+      fileName: typeof item.fileName === "string" ? item.fileName : undefined,
+      title: typeof item.title === "string" ? item.title : undefined,
+      cwd: typeof item.cwd === "string" ? item.cwd : undefined,
+      archived: item.archived === true,
+      modifiedMs: Number.isFinite(item.modifiedMs) ? item.modifiedMs : undefined,
+      bookmarkedAt: Number.isFinite(item.bookmarkedAt) ? item.bookmarkedAt : Date.now(),
+    };
+    if (!bookmark.sessionId && !bookmark.filePath && !bookmark.fileName) continue;
+    const duplicate = bookmarks.some((saved) => {
+      if (bookmark.sessionId && saved.sessionId) return saved.sessionId === bookmark.sessionId;
+      return Boolean((bookmark.fileName && saved.fileName === bookmark.fileName)
+        || (bookmark.filePath && saved.filePath === bookmark.filePath));
+    });
+    if (!duplicate) bookmarks.push(bookmark);
+  }
+  return bookmarks;
 }
 
 module.exports = AgentTraceReaderPlugin;

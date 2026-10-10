@@ -6,7 +6,8 @@ A local-first, read-only reader for agent traces. v0.2 focuses on **Codex rollou
 
 - Auto-discovers Codex rollouts under `$CODEX_HOME` or `~/.codex`, including both `sessions/` and `archived_sessions/` (configurable).
 - Session browser grouped by recency; no symlink or copying into the vault.
-- Session overview searches the loaded sessions by title, cwd, id, archive state, or trace path.
+- Session overview searches the loaded sessions by title, cwd, id, archive state, or trace path, and shows them 50 per page.
+- Bookmark sessions from the overview or trace header; bookmarks keep a local session reference and resolve across active/archive folders.
 - Session overview uses separated, color-coded recency sections and readable cards.
 - Filters Codex runtime/bootstrap wrappers from titles; repeated titles get a short session-id suffix in the overview.
 - Three views over the same evidence: **Conversation / Trajectory / Raw**.
@@ -77,6 +78,7 @@ The normalization layer is presentation-only. Original records remain available,
 ## Safety / performance
 
 - Read-only access to trace files.
+- Bookmarks store only session identifiers and file metadata in plugin settings; trace contents are never copied.
 - Session list reads only a small prefix for metadata/title.
 - Opening a trace streams JSONL instead of reading the whole file into one JavaScript string.
 - Large traces keep line offsets and normalized metadata in memory; event bodies and raw lines load on demand.
