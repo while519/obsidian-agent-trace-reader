@@ -1,0 +1,64 @@
+name: Publish requested release
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/release-request.json"
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: publish-plugin-release
+  cancel-in-progress: false
+jobs:
+  validate:
+    uses: ./.github/workflows/validate.yml
+    permissions:
+      contents: read
+  publish:
+    needs: validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Verify release request matches manifest and package
+        run: |
+          node <<'NODE'
+          const fs = require("fs");
+          const request = JSON.parse(fs.readFileSync(".github/release-request.json", "utf8"));
+          const manifest = JSON.parse(fs.readFileSync("manifest.json", "utf8"));
+          const pkg = JSON.parse(fs.readFileSync("package.json", "utf8"));
+          const versions = JSON.parse(fs.readFileSync("versions.json", "utf8"));
+          if (!/^\d+\.\d+\.\d+$/.test(request.version)) throw new Error("Use x.y.z tag format");
+          if (request.version !== manifest.version || request.version !== pkg.version) throw new Error("Version mismatch");
+          if (versions[request.version] !== manifest.minAppVersion) throw new Error("Minimum Obsidian version mismatch");
+          for (const asset of ["main.js", "manifest.json", "styles.css"]) {
+            if (!fs.existsSync(asset) || fs.statSync(asset).size === 0) throw new Error("Missing/empty asset: " + asset);
+          }
+          NODE
+      - name: Publish release with verified assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(node -p "require('./.github/release-request.json').version")"
+          if git ls-remote --tags --exit-code origin "refs/tags/$version" >/dev/null; then
+            echo "Tag $version already exists; refusing to overwrite it." >&2
+            exit 1
+          fi
+          awk -v ver="$version" '
+            /^## / {
+              if (found) exit
+              if (index($0, "## " ver " ") == 1) found=1
+              next
+            }
+            found { print }
+          ' CHANGELOG.md > /tmp/agent-trace-release-notes.md
+          test -s /tmp/agent-trace-release-notes.md
+          gh release create "$version" main.js manifest.json styles.css \
+            --target "$GITHUB_SHA" \
+            --title "$version" \
+            --notes-file /tmp/agent-trace-release-notes.md
