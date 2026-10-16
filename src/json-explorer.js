@@ -108,7 +108,7 @@ function renderJsonTree(parent, rootValue, label = "root", view = null, focusPat
       }
     };
     details.addEventListener("toggle", () => { if (details.open && cursor === 0) showNext(); });
-    if (focusPath && (focusPath === pointer || focusPath.startsWith(pointer + "/") || pointer === "")) {
+    if (pointer === "" || (focusPath && (focusPath === pointer || focusPath.startsWith(pointer + "/")))) {
       details.open = true;
       showNext();
       // Path focusing is bounded by the same child pagination; very wide arrays may require Load next.
