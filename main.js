@@ -1215,6 +1215,14 @@ var require_trace_explorer = __commonJS({
     var { renderJsonTree } = require_json_explorer();
     var { projectTurns, pairCalls, timelineBounds, eventTimeline, durationText, eventLabel, searchEvents } = require_trace_model();
     var BATCH = 120;
+    function hasReadableContent(event) {
+      const length = Number(event?.contentLength);
+      if (Number.isFinite(length)) {
+        if (length <= 0) return false;
+        return event.preview === void 0 || String(event.preview).trim().length > 0;
+      }
+      return String(event?.preview || event?.content || "").trim().length > 0;
+    }
     function renderTraceExplorer(parent, trace, view) {
       const events = trace.events || [];
       const pairs = pairCalls(events);
@@ -1230,14 +1238,21 @@ var require_trace_explorer = __commonJS({
       const toolbar = wrap.createDiv({ cls: "atr-explorer-toolbar" });
       const search = toolbar.createEl("input", { cls: "atr-explorer-search", attr: { type: "search", placeholder: "Filter event type, tool name, text\u2026", "aria-label": "Search events" } });
       const select = toolbar.createEl("select", { cls: "atr-explorer-filter", attr: { "aria-label": "Filter event type" } });
-      for (const kind of ["all", "user", "assistant", "tool-call", "tool-result", "reasoning", "event", "metadata", "unknown"]) {
-        const option = select.createEl("option", { text: kind === "all" ? "All events" : kind });
+      const kinds = ["all", "user", "assistant", "tool-call", "tool-result", "reasoning", "event", "metadata", "unknown"];
+      for (const kind of kinds) {
+        const count = kind === "all" ? events.length : events.filter((event) => event.kind === kind).length;
+        const option = select.createEl("option", { text: `${kind === "all" ? "All types" : kind} (${count.toLocaleString()})` });
         option.value = kind;
       }
+      const emptyToggle = toolbar.createEl("label", { cls: "atr-explorer-empty-toggle" });
+      const includeEmpty = emptyToggle.createEl("input", { attr: { type: "checkbox", "aria-label": "Include records with no readable content" } });
+      emptyToggle.createSpan({ text: "Include empty" });
+      const emptyToggleCount = emptyToggle.createSpan({ cls: "atr-explorer-empty-count" });
+      const filterStatus = toolbar.createSpan({ cls: "atr-explorer-filter-status" });
       const layout = wrap.createDiv({ cls: "atr-explorer-layout" });
       const treePanel = layout.createDiv({ cls: "atr-explorer-tree" });
       const inspector = layout.createDiv({ cls: "atr-explorer-inspector" });
-      let current = events.find((event) => event.kind === "user" && !event.bootstrap) || events[0] || null;
+      let current = events.find((event) => event.kind === "user" && !event.bootstrap && hasReadableContent(event)) || events.find(hasReadableContent) || events[0] || null;
       function inspect(event) {
         current = event;
         inspector.empty();
@@ -1281,23 +1296,31 @@ var require_trace_explorer = __commonJS({
             renderJsonTree(body, hydrated.raw === void 0 ? hydrated : hydrated.raw, "event", view);
           } else if (mode === "Raw") {
             body.createEl("pre", { cls: "atr-explorer-text", text: JSON.stringify(hydrated.raw === void 0 ? hydrated : hydrated.raw, null, 2) });
-          } else if (mode === "Markdown" && hydrated.content) {
-            const result = MarkdownRenderer.render(view.app, hydrated.content, body, "", view);
-            if (result?.catch) result.catch((error) => body.createDiv({ cls: "atr-data-error", text: error.message }));
+          } else if (mode === "Markdown") {
+            if (!hydrated.content) {
+              body.createDiv({ cls: "atr-explorer-empty", text: "No Markdown content is available for this event." });
+            } else {
+              const result = MarkdownRenderer.render(view.app, hydrated.content, body, "", view);
+              if (result?.catch) result.catch((error) => body.createDiv({ cls: "atr-data-error", text: error.message }));
+            }
           }
         };
-        for (const tab of ["Content", "Fields", "Raw", "Markdown"]) {
+        for (const tab of ["Markdown", "Content", "Fields", "Raw"]) {
           const button = tabs.createEl("button", { cls: "atr-explorer-tab", text: tab, attr: { type: "button" } });
           button.onclick = () => renderTab(tab);
         }
-        renderTab("Content");
+        renderTab("Markdown");
       }
       function drawList() {
         treePanel.empty();
         const q = search.value, kind = select.value;
         let visible = 0;
+        let emptyCount = 0;
         for (const group of groups) {
-          const matching = searchEvents(group.events, q, kind);
+          const candidates = searchEvents(group.events, q, kind);
+          const empty = candidates.filter((event) => !hasReadableContent(event));
+          emptyCount += empty.length;
+          const matching = includeEmpty.checked ? candidates : candidates.filter(hasReadableContent);
           if (!matching.length) continue;
           visible += matching.length;
           const section = treePanel.createEl("details", { cls: "atr-explorer-turn", attr: { open: "" } });
@@ -1317,9 +1340,13 @@ var require_trace_explorer = __commonJS({
               line.createSpan({ cls: "atr-explorer-label", text: eventLabel(event) });
               if (pair && pair.call === event && pair.durationMs !== null) line.createSpan({ cls: "atr-explorer-duration", text: durationText(pair.durationMs) });
               if (event.explicitError || pair?.explicitError && pair.call === event) line.createSpan({ cls: "atr-explorer-warning", text: "error" });
-              const time = row.createDiv({ cls: "atr-explorer-row-time" });
-              time.createSpan({ text: event.timestamp ? event.timestamp.slice(11, 23) : "no timestamp" });
-              if (event.hasContent && event.preview) time.createSpan({ cls: "atr-explorer-preview", text: event.preview.slice(0, 110) });
+              const meta = row.createDiv({ cls: "atr-explorer-row-meta" });
+              meta.createSpan({ cls: "atr-explorer-row-time", text: event.timestamp ? event.timestamp.slice(11, 23) : "no timestamp" });
+              if (event.lineNumber) meta.createSpan({ cls: "atr-explorer-row-line-number", text: "line " + event.lineNumber });
+              if (event.callId) meta.createSpan({ cls: "atr-explorer-row-call-id", text: "call " + event.callId });
+              if (event.hasContent && event.preview) {
+                row.createDiv({ cls: "atr-explorer-preview", text: event.preview.slice(0, 220) });
+              }
               const visual = eventTimeline(event, pair, bounds);
               if (visual) {
                 const track = row.createDiv({ cls: "atr-explorer-track" });
@@ -1343,10 +1370,16 @@ var require_trace_explorer = __commonJS({
           };
           loadNext();
         }
-        if (!visible) treePanel.createDiv({ cls: "atr-explorer-empty", text: "No matching trace events." });
+        emptyToggleCount.textContent = `(${emptyCount.toLocaleString()})`;
+        filterStatus.textContent = includeEmpty.checked ? `${visible.toLocaleString()} shown` : `${visible.toLocaleString()} shown \xB7 ${emptyCount.toLocaleString()} empty hidden`;
+        if (!visible) {
+          const message = !includeEmpty.checked && emptyCount ? `${emptyCount.toLocaleString()} matching records have no readable content. Enable \u201CInclude empty\u201D to inspect their fields.` : "No matching trace events.";
+          treePanel.createDiv({ cls: "atr-explorer-empty", text: message });
+        }
       }
       search.oninput = drawList;
       select.onchange = drawList;
+      includeEmpty.onchange = drawList;
       inspect(current);
       drawList();
     }
