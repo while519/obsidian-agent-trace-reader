@@ -38,7 +38,7 @@ Until the Community Plugins listing is available, install the current public rel
 3. Enter `while519/obsidian-agent-trace-reader`.
 4. Enable **Agent Trace Reader** under Community plugins.
 
-The latest stable release is **0.2.0**. The Trace Explorer and new JSON inspector are under development on the `dev/trace-explorer-v0.3` branch and are **not yet released**.
+The latest stable release is **0.3.0**, available from [GitHub Releases](https://github.com/while519/obsidian-agent-trace-reader/releases).
 
 ### Manual installation
 
@@ -66,6 +66,7 @@ Codex JSONL
    ↓ src/sources/codex.js
 Normalized events / projections
    ├─ Conversation
+   ├─ Explorer
    ├─ Trajectory
    └─ Raw
 ```
@@ -113,7 +114,7 @@ and `styles.css`.
 
 This desktop-only plugin reads Codex rollout files **outside your Obsidian vault**. It looks under the configured Codex home (by default `$CODEX_HOME` or `~/.codex`) in the `sessions/` and `archived_sessions/` folders. The files are opened read-only; the plugin does not copy or modify them and does not send trace contents to a server. It does not include telemetry or an account requirement.
 
-Agent traces can contain secrets, credentials, personal data, and private code. Treat copied JSON, exported content, and screenshots accordingly. Opening the optional Markdown preview for untrusted content may load remote image resources through Obsidian's Markdown renderer; the default structured/text views do not intentionally fetch remote data.
+Agent traces can contain secrets, credentials, personal data, and private code. Treat copied JSON, exported content, and screenshots accordingly. The Explorer inspector currently opens the Markdown tab by default, and rendering Markdown containing remote images may load those external resources through Obsidian. For sensitive or untrusted trace content, consider restricting network access or using the Content / Fields / Raw tabs. The plugin itself does not include its own network client or telemetry.
 
 ## Trace Explorer data semantics
 
@@ -121,4 +122,4 @@ The Explorer uses interface patterns inspired by [Langfuse](https://langfuse.com
 
 ## Attribution
 
-The generic JSON-viewing direction was inspired by [viggomeesters/obsidian-json-viewer](https://github.com/viggomeesters/obsidian-json-viewer), MIT licensed. The session browser, Codex adapter, multi-view trace model, and smart-string reader are developed here.
+This project originally began with a modified version of the MIT-licensed [viggomeesters/obsidian-json-viewer](https://github.com/viggomeesters/obsidian-json-viewer). The generic JSON inspector has since been replaced by a new structured-data implementation, while Codex source adapters, session navigation, trace models and explorer interfaces were developed for this project. Historical attribution and copyright notices are preserved; project history is not represented as clean-room development.
