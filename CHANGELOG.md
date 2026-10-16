@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.0 (development)
+- Added Langfuse/Logfire-inspired, evidence-grounded Trace Explorer with turn grouping, timeline positions, call-ID based durations, and an event inspector.
+- Replaced the legacy JSON viewer implementation with an independently designed, lazy, paginated structured-data inspector.
+- Added JSON Pointer navigation and key/value/path search, paged JSONL reading and error-line preservation.
+- Added trace model and structured-data test coverage; retained Codex Conversation, Trajectory, and Raw fallback.
+- Documented external file access, trace-data privacy, and when durations are unavailable.
+
 ## 0.2.0 - 2026-09-22
 - Added per-trace file change detection with an explicit Auto-follow toggle; default change notices do not parse until Refresh is requested.
 - Batched large Process copy reads asynchronously through one open handle per source file.
