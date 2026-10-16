@@ -30,11 +30,13 @@ function pairCalls(events) {
 }
 function projectTurns(events) {
   const groups = [];
+  let turnNumber = 0;
   let active = { id: "setup", label: "Session setup", events: [], number: 0 };
   for (const event of events) {
     if (event.kind === "user" && !event.bootstrap) {
       if (active.events.length) groups.push(active);
-      active = { id: "turn-" + (groups.length + 1), label: "Turn " + (groups.filter(group => group.number).length + 1), events: [], number: groups.filter(group => group.number).length + 1 };
+      turnNumber += 1;
+      active = { id: "turn-" + turnNumber, label: "Turn " + turnNumber, events: [], number: turnNumber };
     }
     active.events.push(event);
   }
