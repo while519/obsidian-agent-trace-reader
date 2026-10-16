@@ -1,6 +1,5 @@
 const {
   ItemView,
-  TextFileView,
   PluginSettingTab,
   Setting,
   MarkdownRenderer,
@@ -10,6 +9,8 @@ const {
 const fs = require("fs");
 const shared = require("./shared");
 const source = require("./sources/codex");
+const { JsonView, renderJsonTree } = require("./json-explorer");
+const { renderTraceExplorer } = require("./trace-explorer");
 const {
   VS,
   VT,
@@ -330,7 +331,7 @@ class Trace extends ItemView {
       if (refreshNow) this.load();
     };
     const tabs = controls.createDiv({ cls: "atr-tabs" });
-    for (const tab of ["conversation", "trajectory", "raw"]) {
+    for (const tab of ["conversation", "explorer", "trajectory", "raw"]) {
       const tabEl = tabs.createEl("button", {
         cls: `atr-tab${this.tab === tab ? " is-active" : ""}`,
         text: cap(tab),
@@ -359,6 +360,7 @@ class Trace extends ItemView {
 
     const body = rootEl.createDiv({ cls: "atr-trace-body" });
     if (this.tab === "conversation") this.convo(body, trace.events);
+    else if (this.tab === "explorer") renderTraceExplorer(body, trace, this);
     else if (this.tab === "trajectory") this.traj(body, trace.events);
     else rawView(body, trace);
   }
@@ -462,73 +464,6 @@ class Trace extends ItemView {
       text: "Trace changed on disk. Refresh to read the new records.",
     });
     if (body) body.before(notice);
-  }
-}
-
-class JsonView extends TextFileView {
-  getViewType() {
-    return VJ;
-  }
-
-  getDisplayText() {
-    return this.file?.basename || "JSON viewer";
-  }
-
-  getIcon() {
-    return "braces";
-  }
-
-  setViewData(data) {
-    this.data = data;
-    this.render();
-  }
-
-  getViewData() {
-    return this.data;
-  }
-
-  clear() {
-    this.data = "";
-    this.contentEl.empty();
-  }
-
-  render() {
-    const rootEl = this.contentEl;
-    rootEl.empty();
-    rootEl.addClass("atr-json");
-    const header = rootEl.createDiv({ cls: "atr-header" });
-    header.createEl("h2", { text: this.file?.name || "JSON" });
-    copyButton(header, "Copy JSON", () => this.data, { text: "Copy" });
-    const extension = this.file?.extension?.toLowerCase() || "json";
-
-    if (extension === "jsonl" || extension === "ndjson") {
-      const lines = this.data.split(/\r?\n/).filter((line) => line.trim());
-      lines.slice(0, JLIM).forEach((line, index) => {
-        const record = rootEl.createEl("details", { cls: "atr-json-record" });
-        const summary = record.createEl("summary");
-        summary.createSpan({ text: `line ${index + 1}` });
-        copyButton(summary, "Copy record", () => line);
-        try {
-          jsonTree(record, JSON.parse(line), "root", this);
-        } catch {
-          record.createEl("pre", { text: line });
-        }
-      });
-      if (lines.length > JLIM) {
-        rootEl.createDiv({
-          cls: "atr-warning",
-          text: `${(lines.length - JLIM).toLocaleString()} records hidden for performance.`,
-        });
-      }
-      return;
-    }
-
-    try {
-      jsonTree(rootEl, JSON.parse(this.data), "root", this);
-    } catch (error) {
-      rootEl.createDiv({ cls: "atr-error", text: `JSON parse error: ${err(error)}` });
-      rootEl.createEl("pre", { text: this.data });
-    }
   }
 }
 
@@ -652,7 +587,7 @@ function renderEventDetails(parent, event, comp) {
       return;
     }
     if (hydrated.content !== undefined) smart(parent, hydrated.content, comp);
-    if (hydrated.raw !== undefined) jsonTree(parent, hydrated.raw, "raw", comp);
+    if (hydrated.raw !== undefined) renderJsonTree(parent, hydrated.raw, "raw", comp);
   } catch (error) {
     parent.createDiv({ cls: "atr-error", text: `Could not load event: ${err(error)}` });
   }
@@ -685,7 +620,7 @@ function smart(parent, value, comp) {
     } else if (mode === "Raw") {
       output.createEl("pre", { cls: "atr-plain-text", text: JSON.stringify(value) });
     } else {
-      jsonTree(output, parsed, "root", comp);
+      renderJsonTree(output, parsed, "root", comp);
     }
   };
 
@@ -701,41 +636,6 @@ function smart(parent, value, comp) {
   details.addEventListener("toggle", () => {
     if (details.open && !rendered) render(active);
   });
-}
-
-function jsonTree(parent, value, label, comp) {
-  if (Array.isArray(value)) {
-    const branch = parent.createEl("details", { cls: "atr-json-branch", attr: { open: "" } });
-    const summary = branch.createEl("summary");
-    summary.createSpan({ text: `${label}  [${value.length}]` });
-    copyButton(summary, "Copy JSON", () => JSON.stringify(value, null, 2));
-    value.forEach((item, index) => jsonTree(branch, item, `[${index}]`, comp));
-    return;
-  }
-  if (obj(value)) {
-    const entries = Object.entries(value);
-    const branch = parent.createEl("details", { cls: "atr-json-branch", attr: { open: "" } });
-    const summary = branch.createEl("summary");
-    summary.createSpan({ text: `${label}  {${entries.length}}` });
-    copyButton(summary, "Copy JSON", () => JSON.stringify(value, null, 2));
-    entries.forEach(([key, item]) => jsonTree(branch, item, key, comp));
-    return;
-  }
-
-  const row = parent.createDiv({ cls: "atr-json-leaf" });
-  row.createSpan({ cls: "atr-json-key", text: label });
-  row.createSpan({ cls: "atr-json-type", text: value === null ? "null" : typeof value });
-  if (typeof value === "string" && (value.length >= SMART || /\r?\n/.test(value))) {
-    const smartEl = row.createDiv({ cls: "atr-json-smart" });
-    smart(smartEl, value, comp);
-  } else {
-    row.createSpan({
-      cls: "atr-json-value",
-      text: typeof value === "string" ? value : JSON.stringify(value),
-    });
-    const copy = copyButton(row, "Copy value", () => jsonValueText(value));
-    copy.addClass("atr-json-copy");
-  }
 }
 
 function rawView(parent, trace) {

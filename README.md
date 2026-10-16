@@ -1,6 +1,6 @@
 # Agent Trace Reader for Obsidian
 
-A local-first, read-only reader for agent traces. v0.2 focuses on **Codex rollout sessions** and keeps a generic Smart JSON/JSONL viewer as the raw fallback.
+A local-first, read-only reader for agent traces. It focuses on **Codex rollout sessions** and structured JSON/JSONL inspection inside Obsidian.
 
 ## Highlights
 
@@ -9,7 +9,9 @@ A local-first, read-only reader for agent traces. v0.2 focuses on **Codex rollou
 - Session overview searches the loaded sessions by title, cwd, id, archive state, or trace path.
 - Session overview uses separated, color-coded recency sections and readable cards.
 - Filters Codex runtime/bootstrap wrappers from titles; repeated titles get a short session-id suffix in the overview.
-- Three views over the same evidence: **Conversation / Trajectory / Raw**.
+- Four complementary views over the same evidence: **Conversation / Explorer / Trajectory / Raw**.
+- Explorer uses a turn-grouped event list with timestamp position, tool-call/result pairing only where call IDs match, and a detail inspector for content, JSON fields, and raw evidence.
+- The new structured-data inspector supports lazy tree expansion, paging for large arrays and JSONL, JSON Pointer navigation, and key/value/path search.
 - Running traces can be manually re-read with **Refresh trace**; the live update path is event-driven rather than fixed-interval polling.
 - An open trace watches only its own file for changes; **Auto** can follow new records, while the default mode shows a lightweight refresh notice.
 - Compact Conversation mode groups system/tool/reasoning traffic into collapsible Process blocks.
@@ -36,7 +38,7 @@ Until the Community Plugins listing is available, install the current public rel
 3. Enter `while519/obsidian-agent-trace-reader`.
 4. Enable **Agent Trace Reader** under Community plugins.
 
-The current public release is **0.2.0**.
+The latest stable release is **0.2.0**. The Trace Explorer and new JSON inspector are under development on the `dev/trace-explorer-v0.3` branch and are **not yet released**.
 
 ### Manual installation
 
@@ -105,6 +107,17 @@ npm run check
 The repository keeps the source under `src/` and generates the root `main.js`
 artifact with esbuild. Releases still contain only `main.js`, `manifest.json`,
 and `styles.css`.
+
+
+## Privacy and local file access
+
+This desktop-only plugin reads Codex rollout files **outside your Obsidian vault**. It looks under the configured Codex home (by default `$CODEX_HOME` or `~/.codex`) in the `sessions/` and `archived_sessions/` folders. The files are opened read-only; the plugin does not copy or modify them and does not send trace contents to a server. It does not include telemetry or an account requirement.
+
+Agent traces can contain secrets, credentials, personal data, and private code. Treat copied JSON, exported content, and screenshots accordingly. Opening the optional Markdown preview for untrusted content may load remote image resources through Obsidian's Markdown renderer; the default structured/text views do not intentionally fetch remote data.
+
+## Trace Explorer data semantics
+
+The Explorer uses interface patterns inspired by [Langfuse](https://langfuse.com) and [Pydantic Logfire](https://pydantic.dev/logfire), without copying their UI source code. Codex rollout JSONL is an event stream rather than OpenTelemetry traces. A tool duration is shown only when a `call_id` pairs a call and result and both events have valid ordered timestamps. Missing IDs or timestamps produce **unknown duration**; no artificial nesting, token costs, or success statuses are inferred. Turn grouping is a reading aid, not a recorded parent-span hierarchy.
 
 ## Attribution
 
