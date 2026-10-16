@@ -108,10 +108,18 @@ function renderJsonTree(parent, rootValue, label = "root", view = null, focusPat
       }
     };
     details.addEventListener("toggle", () => { if (details.open && cursor === 0) showNext(); });
-    if (pointer === "" || (focusPath && (focusPath === pointer || focusPath.startsWith(pointer + "/")))) {
+    const isOnFocusPath = Boolean(focusPath && (pointer === "" || focusPath === pointer || focusPath.startsWith(pointer + "/")));
+    if ((pointer === "" && label !== "record") || isOnFocusPath) {
       details.open = true;
-      showNext();
-      // Path focusing is bounded by the same child pagination; very wide arrays may require Load next.
+      const remainingPath = pointer ? focusPath.slice(pointer.length + 1) : focusPath.slice(1);
+      const segment = remainingPath.split("/")[0].replace(/~1/g, "/").replace(/~0/g, "~");
+      const targetIndex = isOnFocusPath && segment ? keys.indexOf(segment) : -1;
+      if (targetIndex >= CHILD_PAGE) {
+        cursor = keys.length;
+        children.createDiv({ cls: "atr-data-focus-note", text: "Focused match at item " + (targetIndex + 1) + " / " + keys.length });
+        renderNode(children, collection[segment], segment, appendPointer(pointer, segment), depth + 1);
+        elementButton(children, "Browse this collection from the start", () => { children.empty(); cursor = 0; showNext(); });
+      } else showNext();
     }
   };
   renderNode(nodeRoot, rootValue, label, "", 0);
@@ -185,6 +193,7 @@ class JsonView extends TextFileView {
 
   renderJsonl(controls, body) {
     const lines = this.data.split(/\r?\n/);
+    while (lines.length && !lines[lines.length - 1].trim()) lines.pop();
     const totalPages = Math.max(1, Math.ceil(lines.length / PAGE_SIZE));
     this.page = Math.min(this.page, totalPages - 1);
     const nav = controls.createDiv({ cls: "atr-data-pagination" });
