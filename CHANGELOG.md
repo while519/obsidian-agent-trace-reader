@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.3.0 (development)
+## 0.3.0 - 2026-10-16
 - Added Langfuse/Logfire-inspired, evidence-grounded Trace Explorer with turn grouping, timeline positions, call-ID based durations, and an event inspector.
 - Replaced the legacy JSON viewer implementation with an independently designed, lazy, paginated structured-data inspector.
 - Added JSON Pointer navigation and key/value/path search, paged JSONL reading and error-line preservation.
