@@ -23,7 +23,8 @@ function renderTraceExplorer(parent, trace, view) {
   const search = toolbar.createEl("input", { cls: "atr-explorer-search", attr: { type: "search", placeholder: "Filter event type, tool name, text…", "aria-label": "Search events" } });
   const select = toolbar.createEl("select", { cls: "atr-explorer-filter", attr: { "aria-label": "Filter event type" } });
   for (const kind of ["all", "user", "assistant", "tool-call", "tool-result", "reasoning", "event", "metadata", "unknown"]) {
-    select.createEl("option", { text: kind === "all" ? "All events" : kind, value: kind });
+    const option = select.createEl("option", { text: kind === "all" ? "All events" : kind });
+    option.value = kind;
   }
 
   const layout = wrap.createDiv({ cls: "atr-explorer-layout" });
