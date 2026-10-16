@@ -191,7 +191,7 @@ function responseEvent(record, payload, index, timestamp, options) {
       text || str(payload.output),
       record,
       options,
-      { sourceSubtype: type },
+      { sourceSubtype: type, callId: str(payload.call_id) || undefined, explicitError: payload.is_error === true || payload.isError === true || payload.status === "error" },
     );
   }
   if (/function_call|tool_call|custom_tool_call/i.test(type)) {
@@ -206,7 +206,7 @@ function responseEvent(record, payload, index, timestamp, options) {
       content,
       record,
       options,
-      { sourceSubtype: type },
+      { sourceSubtype: type, callId: str(payload.call_id) || undefined },
     );
   }
   if (/reason|analysis/i.test(type)) {
@@ -248,6 +248,7 @@ function makeEvent(index, timestamp, sourceType, kind, title, content, record, o
     ...extra,
   };
   if (hasContent && (kind === "user" || kind === "assistant")) event.contentHash = hashText(content);
+  if (kind === "user" && hasContent) event.bootstrap = isBootstrap(content);
   if (options.keepContent && hasContent) event.content = content;
   if (options.keepRaw) event.raw = record;
   return event;
