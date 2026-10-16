@@ -50,15 +50,15 @@ function searchValue(root, query, options = {}) {
     const value = node.value;
     const scalar = value === null || typeof value !== "object";
     const text = scalar ? preview(value, 600) : "";
-    if ([node.key, node.path, text].some(part => String(part).toLocaleLowerCase().includes(needle))) {
-      matches.push({ path: node.path, key: node.key, type: kindOf(value), preview: preview(value) });
-    }
     if (!scalar) {
       const entries = Object.entries(value);
       for (let i = entries.length - 1; i >= 0; i -= 1) {
         const entry = entries[i];
         stack.push({ value: entry[1], key: entry[0], path: appendPointer(node.path, entry[0]) });
       }
+    }
+    if ([node.key, node.path, text].some(part => String(part).toLocaleLowerCase().includes(needle))) {
+      matches.push({ path: node.path, key: node.key, type: kindOf(value), preview: preview(value) });
     }
   }
   return { matches, visited, truncated: stack.length > 0 };
