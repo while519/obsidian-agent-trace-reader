@@ -726,3 +726,4 @@
   .atr-explorer-tree { max-height:300px; }
   .atr-explorer-inspector-content { max-height:none; }
 }
+.atr-data-focus-note { color:var(--text-muted);font-size:.8em;padding:7px 10px;background:var(--background-secondary);border-radius:5px;margin:6px 0; }
