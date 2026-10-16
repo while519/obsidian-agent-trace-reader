@@ -378,7 +378,7 @@ var require_codex = __commonJS({
           text || str(payload.output),
           record,
           options,
-          { sourceSubtype: type }
+          { sourceSubtype: type, callId: str(payload.call_id) || void 0, explicitError: payload.is_error === true || payload.isError === true || payload.status === "error" }
         );
       }
       if (/function_call|tool_call|custom_tool_call/i.test(type)) {
@@ -393,7 +393,7 @@ var require_codex = __commonJS({
           content,
           record,
           options,
-          { sourceSubtype: type }
+          { sourceSubtype: type, callId: str(payload.call_id) || void 0 }
         );
       }
       if (/reason|analysis/i.test(type)) {
@@ -432,6 +432,7 @@ var require_codex = __commonJS({
         ...extra
       };
       if (hasContent && (kind === "user" || kind === "assistant")) event.contentHash = hashText(content);
+      if (kind === "user" && hasContent) event.bootstrap = isBootstrap(content);
       if (options.keepContent && hasContent) event.content = content;
       if (options.keepRaw) event.raw = record;
       return event;
@@ -747,12 +748,603 @@ var require_codex = __commonJS({
   }
 });
 
+// src/structured-data.js
+var require_structured_data = __commonJS({
+  "src/structured-data.js"(exports2, module2) {
+    "use strict";
+    var PAGE_SIZE = 80;
+    var SEARCH_LIMIT = 150;
+    var SEARCH_BUDGET = 5e4;
+    function encodeSegment(value) {
+      return String(value).replace(/~/g, "~0").replace(/\//g, "~1");
+    }
+    function decodeSegment(value) {
+      return String(value).replace(/~1/g, "/").replace(/~0/g, "~");
+    }
+    function appendPointer(pointer, key) {
+      return pointer + "/" + encodeSegment(key);
+    }
+    function resolvePointer(root, pointer) {
+      if (!pointer) return root;
+      if (pointer[0] !== "/") return void 0;
+      let value = root;
+      for (const fragment of pointer.slice(1).split("/")) {
+        const key = decodeSegment(fragment);
+        if (value === null || typeof value !== "object" || !Object.prototype.hasOwnProperty.call(value, key)) return void 0;
+        value = value[key];
+      }
+      return value;
+    }
+    function kindOf(value) {
+      if (value === null) return "null";
+      if (Array.isArray(value)) return "array";
+      return typeof value;
+    }
+    function preview(value, maxChars = 180) {
+      if (typeof value === "string") return value.replace(/\s+/g, " ").slice(0, maxChars);
+      if (value === null || typeof value !== "object") return String(value);
+      return Array.isArray(value) ? "Array (" + value.length + ")" : "Object (" + Object.keys(value).length + ")";
+    }
+    function searchValue(root, query, options = {}) {
+      const needle = String(query || "").trim().toLocaleLowerCase();
+      if (!needle) return { matches: [], visited: 0, truncated: false };
+      const limit = Math.max(1, options.limit || SEARCH_LIMIT);
+      const budget = Math.max(1, options.budget || SEARCH_BUDGET);
+      const stack = [{ value: root, path: "", key: "root" }];
+      const matches = [];
+      let visited = 0;
+      while (stack.length && visited < budget && matches.length < limit) {
+        const node = stack.pop();
+        visited += 1;
+        const value = node.value;
+        const scalar = value === null || typeof value !== "object";
+        const text = scalar ? preview(value, 600) : "";
+        if (!scalar) {
+          const entries = Object.entries(value);
+          for (let i = entries.length - 1; i >= 0; i -= 1) {
+            const entry = entries[i];
+            stack.push({ value: entry[1], key: entry[0], path: appendPointer(node.path, entry[0]) });
+          }
+        }
+        if ([node.key, node.path, text].some((part) => String(part).toLocaleLowerCase().includes(needle))) {
+          matches.push({ path: node.path, key: node.key, type: kindOf(value), preview: preview(value) });
+        }
+      }
+      return { matches, visited, truncated: stack.length > 0 };
+    }
+    function parseJsonlPage(lines, page, size = PAGE_SIZE) {
+      const start = Math.max(0, page | 0) * size;
+      const end = Math.min(lines.length, start + size);
+      const records = [];
+      for (let i = start; i < end; i += 1) {
+        const line = lines[i];
+        if (!line || !line.trim()) continue;
+        try {
+          records.push({ line: i + 1, value: JSON.parse(line) });
+        } catch (error) {
+          records.push({ line: i + 1, error: error.message, source: line });
+        }
+      }
+      return { records, start, end, total: lines.length, more: end < lines.length };
+    }
+    function jsonErrorLocation(message, source) {
+      const match = String(message).match(/position (\d+)/i);
+      if (!match) return null;
+      const pos = Number(match[1]);
+      const before = source.slice(0, pos).split(/\r?\n/);
+      return { line: before.length, column: before[before.length - 1].length + 1 };
+    }
+    module2.exports = { PAGE_SIZE, appendPointer, resolvePointer, kindOf, preview, searchValue, parseJsonlPage, jsonErrorLocation };
+  }
+});
+
+// src/json-explorer.js
+var require_json_explorer = __commonJS({
+  "src/json-explorer.js"(exports2, module2) {
+    "use strict";
+    var { TextFileView, MarkdownRenderer, Notice, setIcon } = require("obsidian");
+    var { PAGE_SIZE, appendPointer, resolvePointer, kindOf, preview, searchValue, parseJsonlPage, jsonErrorLocation } = require_structured_data();
+    var CHILD_PAGE = 80;
+    var RAW_PREVIEW = 25e4;
+    function copyButton(parent, label, value) {
+      const button = parent.createEl("button", { cls: "atr-data-action clickable-icon", attr: { type: "button", "aria-label": label, title: label } });
+      setIcon(button, "copy");
+      button.addEventListener("click", async (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        try {
+          const text = typeof value === "function" ? value() : value;
+          if (typeof navigator !== "undefined" && navigator.clipboard?.writeText) await navigator.clipboard.writeText(String(text));
+          else {
+            const node = document.createElement("textarea");
+            node.value = String(text);
+            node.style.position = "fixed";
+            node.style.opacity = "0";
+            document.body.appendChild(node);
+            node.select();
+            if (!document.execCommand("copy")) throw new Error("Clipboard unavailable");
+            node.remove();
+          }
+          new Notice("Copied " + label.toLowerCase());
+        } catch (error) {
+          new Notice("Copy failed: " + error.message);
+        }
+      });
+      return button;
+    }
+    function elementButton(parent, text, onClick, cls = "") {
+      const button = parent.createEl("button", { cls: "atr-data-button " + cls, text, attr: { type: "button" } });
+      button.addEventListener("click", onClick);
+      return button;
+    }
+    function renderLongString(parent, value, view) {
+      const box = parent.createEl("details", { cls: "atr-data-long" });
+      box.createEl("summary", { text: "String \xB7 " + value.length.toLocaleString() + " characters \xB7 " + preview(value, 110) });
+      const controls = box.createDiv({ cls: "atr-data-long-controls" });
+      const content = box.createDiv({ cls: "atr-data-long-body" });
+      const json = value.trim().startsWith("{") || value.trim().startsWith("[") ? tryJSON(value) : null;
+      const tabs = ["Text", ...value.length <= 25e4 ? ["Markdown"] : [], ...json !== null ? ["JSON"] : []];
+      let active = "Text", loaded = false;
+      function render() {
+        loaded = true;
+        content.empty();
+        controls.querySelectorAll("button.atr-data-button").forEach((node) => node.toggleClass("is-active", node.textContent === active));
+        if (active === "Markdown" && view?.app) {
+          const result = MarkdownRenderer.render(view.app, value, content, view.file?.path || "", view);
+          if (result?.catch) result.catch(() => {
+            content.empty();
+            content.createEl("pre", { text: value });
+          });
+        } else if (active === "JSON" && json !== null) {
+          renderJsonTree(content, json, "value", view);
+        } else content.createEl("pre", { cls: "atr-data-text", text: value });
+      }
+      for (const tab of tabs) elementButton(controls, tab, () => {
+        active = tab;
+        render();
+      }, tab === active ? "is-active" : "");
+      copyButton(controls, "Copy string", () => value);
+      box.addEventListener("toggle", () => {
+        if (box.open && !loaded) render();
+      });
+    }
+    function tryJSON(value) {
+      try {
+        return JSON.parse(value);
+      } catch {
+        return null;
+      }
+    }
+    function renderJsonTree(parent, rootValue, label = "root", view = null, focusPath = "") {
+      if (typeof label === "object" && label !== null) {
+        focusPath = label.focusPath || "";
+        view = label.view || null;
+        label = label.label || "root";
+      }
+      const nodeRoot = parent.createDiv({ cls: "atr-data-tree" });
+      const renderNode = (where, value, key, pointer, depth) => {
+        const type = kindOf(value);
+        const composite = type === "object" || type === "array";
+        const row = where.createDiv({ cls: "atr-data-node" });
+        if (focusPath === pointer) row.addClass("atr-data-selected");
+        if (!composite) {
+          const leaf = row.createDiv({ cls: "atr-data-leaf" });
+          leaf.createSpan({ cls: "atr-data-key", text: String(key) });
+          leaf.createSpan({ cls: "atr-data-kind", text: type });
+          if (type === "string" && (value.length > 250 || value.includes("\n"))) {
+            renderLongString(row, value, view);
+          } else {
+            leaf.createSpan({ cls: "atr-data-value", text: preview(value, 2e3) });
+          }
+          const actions2 = leaf.createSpan({ cls: "atr-data-actions" });
+          copyButton(actions2, "Copy path", () => pointer || "/");
+          copyButton(actions2, "Copy value", () => type === "string" ? value : JSON.stringify(value));
+          return;
+        }
+        const collection = value;
+        const keys = Object.keys(collection);
+        const details = row.createEl("details", { cls: "atr-data-group" });
+        const summary = details.createEl("summary", { cls: "atr-data-summary" });
+        summary.createSpan({ cls: "atr-data-key", text: String(key) });
+        summary.createSpan({ cls: "atr-data-kind", text: type });
+        summary.createSpan({ cls: "atr-data-count", text: String(keys.length) + (type === "array" ? " items" : " keys") });
+        const actions = summary.createSpan({ cls: "atr-data-actions" });
+        copyButton(actions, "Copy path", () => pointer || "/");
+        copyButton(actions, "Copy JSON", () => JSON.stringify(collection, null, 2));
+        const children = details.createDiv({ cls: "atr-data-children" });
+        let cursor = 0;
+        const showNext = () => {
+          const until = Math.min(cursor + CHILD_PAGE, keys.length);
+          for (; cursor < until; cursor += 1) {
+            const k = keys[cursor];
+            renderNode(children, collection[k], k, appendPointer(pointer, k), depth + 1);
+          }
+          if (cursor < keys.length) {
+            let more = children.querySelector(".atr-data-more");
+            if (!more) more = elementButton(children, "", () => {
+              more.remove();
+              showNext();
+            }, "atr-data-more");
+            more.textContent = "Load next " + Math.min(CHILD_PAGE, keys.length - cursor) + " \xB7 " + (keys.length - cursor) + " remaining";
+          }
+        };
+        details.addEventListener("toggle", () => {
+          if (details.open && cursor === 0) showNext();
+        });
+        if (pointer === "" || focusPath && (focusPath === pointer || focusPath.startsWith(pointer + "/"))) {
+          details.open = true;
+          showNext();
+        }
+      };
+      renderNode(nodeRoot, rootValue, label, "", 0);
+      return nodeRoot;
+    }
+    var JsonView2 = class extends TextFileView {
+      constructor(leaf) {
+        super(leaf);
+        this.data = "";
+        this.page = 0;
+        this.mode = "tree";
+        this.query = "";
+      }
+      getViewType() {
+        return "agent-trace-json";
+      }
+      getDisplayText() {
+        return this.file?.basename || "JSON";
+      }
+      getIcon() {
+        return "braces";
+      }
+      setViewData(data) {
+        this.data = data;
+        this.page = 0;
+        this.render();
+      }
+      getViewData() {
+        return this.data;
+      }
+      clear() {
+        this.data = "";
+        this.contentEl.empty();
+      }
+      render() {
+        const root = this.contentEl;
+        root.empty();
+        root.addClass("atr-json");
+        const header = root.createDiv({ cls: "atr-data-header" });
+        const name = header.createDiv();
+        name.createEl("h2", { text: this.file?.name || "Structured Data" });
+        name.createDiv({ cls: "atr-data-subtitle", text: "Structured document \xB7 read-only" });
+        copyButton(header, "Copy document", () => this.data);
+        const controls = root.createDiv({ cls: "atr-data-toolbar" });
+        elementButton(controls, "Tree", () => {
+          this.mode = "tree";
+          this.render();
+        }, this.mode === "tree" ? "is-active" : "");
+        elementButton(controls, "Raw", () => {
+          this.mode = "raw";
+          this.render();
+        }, this.mode === "raw" ? "is-active" : "");
+        const body = root.createDiv({ cls: "atr-data-document" });
+        if (this.mode === "raw") {
+          const snippet = this.data.length > RAW_PREVIEW ? this.data.slice(0, RAW_PREVIEW) : this.data;
+          body.createEl("pre", { cls: "atr-data-text", text: snippet });
+          if (this.data.length > RAW_PREVIEW) body.createDiv({ cls: "atr-data-notice", text: "Raw preview limited to 250,000 characters; Copy document includes the full content." });
+          return;
+        }
+        const ext = this.file?.extension?.toLowerCase();
+        if (ext === "jsonl" || ext === "ndjson") return this.renderJsonl(controls, body);
+        this.renderSingle(controls, body);
+      }
+      renderSingle(controls, body) {
+        let parsed;
+        try {
+          parsed = JSON.parse(this.data);
+        } catch (error) {
+          const position = jsonErrorLocation(error.message, this.data);
+          const suffix = position ? " (line " + position.line + ", column " + position.column + ")" : "";
+          body.createDiv({ cls: "atr-data-error", text: "Invalid JSON: " + error.message + suffix });
+          body.createEl("pre", { cls: "atr-data-text", text: this.data.slice(0, 8e3) });
+          return;
+        }
+        const search = controls.createEl("input", { cls: "atr-data-search", attr: { type: "search", placeholder: "Search keys, values, JSON Pointer\u2026", "aria-label": "Search JSON" } });
+        search.value = this.query;
+        const results = body.createDiv({ cls: "atr-data-search-results" });
+        const tree = body.createDiv();
+        const select = (pointer) => {
+          tree.empty();
+          renderJsonTree(tree, parsed, "root", this, pointer);
+        };
+        select("");
+        const searchNow = () => {
+          results.empty();
+          this.query = search.value;
+          if (!this.query.trim()) return;
+          const found = searchValue(parsed, this.query);
+          results.createDiv({ cls: "atr-data-result-count", text: found.matches.length + " matches" + (found.truncated ? " \xB7 limited results" : "") });
+          for (const hit of found.matches) {
+            const button = elementButton(results, (hit.path || "/") + " \xB7 " + hit.preview, () => select(hit.path), "atr-data-search-hit");
+            button.title = hit.type;
+          }
+        };
+        search.oninput = searchNow;
+        searchNow();
+      }
+      renderJsonl(controls, body) {
+        const lines = this.data.split(/\r?\n/);
+        const totalPages = Math.max(1, Math.ceil(lines.length / PAGE_SIZE));
+        this.page = Math.min(this.page, totalPages - 1);
+        const nav = controls.createDiv({ cls: "atr-data-pagination" });
+        elementButton(nav, "\u2190 Previous", () => {
+          this.page = Math.max(0, this.page - 1);
+          this.render();
+        }, this.page === 0 ? "is-disabled" : "");
+        nav.createSpan({ text: "Page " + (this.page + 1) + " / " + totalPages });
+        elementButton(nav, "Next \u2192", () => {
+          this.page = Math.min(totalPages - 1, this.page + 1);
+          this.render();
+        }, this.page === totalPages - 1 ? "is-disabled" : "");
+        const page = parseJsonlPage(lines, this.page, PAGE_SIZE);
+        for (const record of page.records) {
+          const section = body.createDiv({ cls: "atr-data-record" });
+          section.createDiv({ cls: "atr-data-record-label", text: "Line " + record.line });
+          if (record.error) {
+            section.createDiv({ cls: "atr-data-error", text: record.error });
+            section.createEl("pre", { cls: "atr-data-text", text: record.source.slice(0, 4e3) });
+          } else renderJsonTree(section, record.value, "record", this);
+        }
+        body.createDiv({ cls: "atr-data-subtitle", text: lines.length.toLocaleString() + " source lines \xB7 parsed one page at a time" });
+      }
+    };
+    module2.exports = { JsonView: JsonView2, renderJsonTree };
+  }
+});
+
+// src/trace-model.js
+var require_trace_model = __commonJS({
+  "src/trace-model.js"(exports2, module2) {
+    "use strict";
+    function timestampMs(event) {
+      const time = event?.timestamp ? Date.parse(event.timestamp) : NaN;
+      return Number.isFinite(time) ? time : null;
+    }
+    function pairCalls(events) {
+      const waiting = /* @__PURE__ */ new Map();
+      const pairs = /* @__PURE__ */ new Map();
+      for (const event of events) {
+        if (!event.callId) continue;
+        if (event.kind === "tool-call") {
+          if (!waiting.has(event.callId)) waiting.set(event.callId, []);
+          waiting.get(event.callId).push(event);
+        } else if (event.kind === "tool-result") {
+          const pending = waiting.get(event.callId);
+          if (!pending?.length) continue;
+          const call = pending.shift();
+          const a = timestampMs(call);
+          const b = timestampMs(event);
+          const durationMs = a !== null && b !== null && b >= a ? b - a : null;
+          const pair = { call, result: event, durationMs, explicitError: event.explicitError === true };
+          pairs.set(call.index, pair);
+          pairs.set(event.index, pair);
+        }
+      }
+      return pairs;
+    }
+    function projectTurns(events) {
+      const groups = [];
+      let turnNumber = 0;
+      let active = { id: "setup", label: "Session setup", events: [], number: 0 };
+      for (const event of events) {
+        if (event.kind === "user" && !event.bootstrap) {
+          if (active.events.length) groups.push(active);
+          turnNumber += 1;
+          active = { id: "turn-" + turnNumber, label: "Turn " + turnNumber, events: [], number: turnNumber };
+        }
+        active.events.push(event);
+      }
+      if (active.events.length) groups.push(active);
+      return groups;
+    }
+    function timelineBounds(events) {
+      let min = Infinity, max = -Infinity;
+      for (const event of events) {
+        const t = timestampMs(event);
+        if (t !== null) {
+          min = Math.min(min, t);
+          max = Math.max(max, t);
+        }
+      }
+      return Number.isFinite(min) ? { start: min, end: max, range: Math.max(1, max - min) } : null;
+    }
+    function eventTimeline(event, paired, bounds) {
+      if (!bounds) return null;
+      const start = timestampMs(event);
+      if (start === null) return null;
+      const end = paired?.call === event && paired.durationMs !== null ? timestampMs(paired.result) : null;
+      return {
+        left: Math.max(0, Math.min(100, (start - bounds.start) / bounds.range * 100)),
+        width: end === null ? 0 : Math.max(0, Math.min(100, (end - start) / bounds.range * 100)),
+        durationMs: end === null ? null : end - start
+      };
+    }
+    function durationText(ms) {
+      if (ms === null || ms === void 0) return "duration unavailable";
+      if (ms < 1e3) return Math.round(ms) + " ms";
+      if (ms < 6e4) return (ms / 1e3).toFixed(2) + " s";
+      return (ms / 6e4).toFixed(1) + " min";
+    }
+    function eventLabel(event) {
+      if (event.kind === "tool-call") return event.title || "Tool call";
+      if (event.kind === "tool-result") return event.title || "Tool result";
+      if (event.kind === "assistant") return "Assistant response";
+      if (event.kind === "user") return "User message";
+      return event.title || event.kind;
+    }
+    function searchEvents(events, query, kind) {
+      const q = String(query || "").trim().toLocaleLowerCase();
+      return events.filter((event) => {
+        if (kind && kind !== "all" && event.kind !== kind) return false;
+        return !q || [event.kind, event.title, event.sourceSubtype, event.preview, event.callId].some((v) => String(v || "").toLocaleLowerCase().includes(q));
+      });
+    }
+    module2.exports = { timestampMs, pairCalls, projectTurns, timelineBounds, eventTimeline, durationText, eventLabel, searchEvents };
+  }
+});
+
+// src/trace-explorer.js
+var require_trace_explorer = __commonJS({
+  "src/trace-explorer.js"(exports2, module2) {
+    "use strict";
+    var { MarkdownRenderer, setIcon } = require("obsidian");
+    var { hydrateEvent } = require_codex();
+    var { renderJsonTree } = require_json_explorer();
+    var { projectTurns, pairCalls, timelineBounds, eventTimeline, durationText, eventLabel, searchEvents } = require_trace_model();
+    var BATCH = 120;
+    function renderTraceExplorer(parent, trace, view) {
+      const events = trace.events || [];
+      const pairs = pairCalls(events);
+      const bounds = timelineBounds(events);
+      const groups = projectTurns(events);
+      const wrap = parent.createDiv({ cls: "atr-explorer" });
+      const summary = wrap.createDiv({ cls: "atr-explorer-summary" });
+      summary.createSpan({ text: events.length.toLocaleString() + " events" });
+      summary.createSpan({ text: groups.filter((group) => group.number).length + " turns" });
+      summary.createSpan({ text: events.filter((event) => event.kind === "tool-call").length + " tools" });
+      summary.createSpan({ text: Math.floor(pairs.size / 2) + " paired calls" });
+      if (trace.errors.length) summary.createSpan({ cls: "atr-explorer-warning", text: trace.errors.length + " malformed lines" });
+      const toolbar = wrap.createDiv({ cls: "atr-explorer-toolbar" });
+      const search = toolbar.createEl("input", { cls: "atr-explorer-search", attr: { type: "search", placeholder: "Filter event type, tool name, text\u2026", "aria-label": "Search events" } });
+      const select = toolbar.createEl("select", { cls: "atr-explorer-filter", attr: { "aria-label": "Filter event type" } });
+      for (const kind of ["all", "user", "assistant", "tool-call", "tool-result", "reasoning", "event", "metadata", "unknown"]) {
+        const option = select.createEl("option", { text: kind === "all" ? "All events" : kind });
+        option.value = kind;
+      }
+      const layout = wrap.createDiv({ cls: "atr-explorer-layout" });
+      const treePanel = layout.createDiv({ cls: "atr-explorer-tree" });
+      const inspector = layout.createDiv({ cls: "atr-explorer-inspector" });
+      let current = events.find((event) => event.kind === "user" && !event.bootstrap) || events[0] || null;
+      function inspect(event) {
+        current = event;
+        inspector.empty();
+        if (!event) {
+          inspector.createDiv({ cls: "atr-explorer-empty", text: "Select an event to inspect the original evidence." });
+          return;
+        }
+        const head = inspector.createDiv({ cls: "atr-explorer-inspector-head" });
+        head.createEl("h3", { text: eventLabel(event) });
+        const meta = head.createDiv({ cls: "atr-explorer-inspector-meta" });
+        meta.createSpan({ text: event.kind });
+        meta.createSpan({ text: "line " + (event.lineNumber || "\u2014") });
+        if (event.timestamp) meta.createSpan({ text: event.timestamp });
+        if (event.callId) meta.createSpan({ text: "call " + event.callId });
+        const pair = pairs.get(event.index);
+        if (pair && pair.call === event) {
+          meta.createSpan({ text: "Observed " + durationText(pair.durationMs) });
+          const related = head.createEl("button", { cls: "atr-explorer-jump", text: "View tool result", attr: { type: "button" } });
+          related.onclick = () => inspect(pair.result);
+        } else if (pair && pair.result === event) {
+          const related = head.createEl("button", { cls: "atr-explorer-jump", text: "View tool call", attr: { type: "button" } });
+          related.onclick = () => inspect(pair.call);
+        }
+        if (event.explicitError) meta.createSpan({ cls: "atr-explorer-warning", text: "Explicit error" });
+        const tabs = head.createDiv({ cls: "atr-explorer-inspector-tabs" });
+        const body = inspector.createDiv({ cls: "atr-explorer-inspector-content" });
+        const renderTab = (mode) => {
+          body.empty();
+          tabs.querySelectorAll("button").forEach((button) => button.toggleClass("is-active", button.textContent === mode));
+          let hydrated;
+          try {
+            hydrated = hydrateEvent(event);
+          } catch (error) {
+            body.createDiv({ cls: "atr-data-error", text: "Trace data unavailable: " + error.message });
+            return;
+          }
+          if (mode === "Content") {
+            if (hydrated.content === void 0) body.createDiv({ cls: "atr-explorer-empty", text: "No text content. See Fields for the full event." });
+            else body.createEl("pre", { cls: "atr-explorer-text", text: hydrated.content });
+          } else if (mode === "Fields") {
+            renderJsonTree(body, hydrated.raw === void 0 ? hydrated : hydrated.raw, "event", view);
+          } else if (mode === "Raw") {
+            body.createEl("pre", { cls: "atr-explorer-text", text: JSON.stringify(hydrated.raw === void 0 ? hydrated : hydrated.raw, null, 2) });
+          } else if (mode === "Markdown" && hydrated.content) {
+            const result = MarkdownRenderer.render(view.app, hydrated.content, body, "", view);
+            if (result?.catch) result.catch((error) => body.createDiv({ cls: "atr-data-error", text: error.message }));
+          }
+        };
+        for (const tab of ["Content", "Fields", "Raw", "Markdown"]) {
+          const button = tabs.createEl("button", { cls: "atr-explorer-tab", text: tab, attr: { type: "button" } });
+          button.onclick = () => renderTab(tab);
+        }
+        renderTab("Content");
+      }
+      function drawList() {
+        treePanel.empty();
+        const q = search.value, kind = select.value;
+        let visible = 0;
+        for (const group of groups) {
+          const matching = searchEvents(group.events, q, kind);
+          if (!matching.length) continue;
+          visible += matching.length;
+          const section = treePanel.createEl("details", { cls: "atr-explorer-turn", attr: { open: "" } });
+          const turnHead = section.createEl("summary", { cls: "atr-explorer-turn-heading" });
+          turnHead.createSpan({ text: group.label });
+          turnHead.createSpan({ cls: "atr-explorer-turn-count", text: matching.length.toLocaleString() });
+          const list = section.createDiv({ cls: "atr-explorer-items" });
+          let cursor = 0;
+          const loadNext = () => {
+            const end = Math.min(cursor + BATCH, matching.length);
+            for (; cursor < end; cursor++) {
+              const event = matching[cursor], pair = pairs.get(event.index);
+              const row = list.createEl("button", { cls: "atr-explorer-row", attr: { type: "button" } });
+              if (current === event) row.addClass("is-active");
+              const line = row.createDiv({ cls: "atr-explorer-row-line" });
+              line.createSpan({ cls: "atr-explorer-kind atr-explorer-kind-" + event.kind, text: event.kind });
+              line.createSpan({ cls: "atr-explorer-label", text: eventLabel(event) });
+              if (pair && pair.call === event && pair.durationMs !== null) line.createSpan({ cls: "atr-explorer-duration", text: durationText(pair.durationMs) });
+              if (event.explicitError || pair?.explicitError && pair.call === event) line.createSpan({ cls: "atr-explorer-warning", text: "error" });
+              const time = row.createDiv({ cls: "atr-explorer-row-time" });
+              time.createSpan({ text: event.timestamp ? event.timestamp.slice(11, 23) : "no timestamp" });
+              if (event.hasContent && event.preview) time.createSpan({ cls: "atr-explorer-preview", text: event.preview.slice(0, 110) });
+              const visual = eventTimeline(event, pair, bounds);
+              if (visual) {
+                const track = row.createDiv({ cls: "atr-explorer-track" });
+                const bar = track.createDiv({ cls: "atr-explorer-bar" + (visual.durationMs !== null ? " has-span" : "") });
+                bar.style.left = visual.left + "%";
+                bar.style.width = Math.max(0.8, visual.width) + "%";
+                bar.title = visual.durationMs !== null ? "Observed tool interval: " + durationText(visual.durationMs) : "Event timestamp";
+              }
+              row.onclick = () => {
+                treePanel.querySelectorAll(".atr-explorer-row.is-active").forEach((node) => node.removeClass("is-active"));
+                row.addClass("is-active");
+                inspect(event);
+              };
+            }
+            const old = list.querySelector(".atr-explorer-more");
+            if (old) old.remove();
+            if (cursor < matching.length) {
+              const more = list.createEl("button", { cls: "atr-explorer-more", text: "Load " + Math.min(BATCH, matching.length - cursor) + " more events", attr: { type: "button" } });
+              more.onclick = loadNext;
+            }
+          };
+          loadNext();
+        }
+        if (!visible) treePanel.createDiv({ cls: "atr-explorer-empty", text: "No matching trace events." });
+      }
+      search.oninput = drawList;
+      select.onchange = drawList;
+      inspect(current);
+      drawList();
+    }
+    module2.exports = { renderTraceExplorer };
+  }
+});
+
 // src/views.js
 var require_views = __commonJS({
   "src/views.js"(exports2, module2) {
     var {
       ItemView,
-      TextFileView,
       PluginSettingTab,
       Setting,
       MarkdownRenderer,
@@ -762,6 +1354,8 @@ var require_views = __commonJS({
     var fs = require("fs");
     var shared = require_shared();
     var source = require_codex();
+    var { JsonView: JsonView2, renderJsonTree } = require_json_explorer();
+    var { renderTraceExplorer } = require_trace_explorer();
     var {
       VS: VS2,
       VT: VT2,
@@ -1040,7 +1634,7 @@ var require_views = __commonJS({
           if (refreshNow) this.load();
         };
         const tabs = controls.createDiv({ cls: "atr-tabs" });
-        for (const tab of ["conversation", "trajectory", "raw"]) {
+        for (const tab of ["conversation", "explorer", "trajectory", "raw"]) {
           const tabEl = tabs.createEl("button", {
             cls: `atr-tab${this.tab === tab ? " is-active" : ""}`,
             text: cap(tab)
@@ -1067,6 +1661,7 @@ var require_views = __commonJS({
         }
         const body = rootEl.createDiv({ cls: "atr-trace-body" });
         if (this.tab === "conversation") this.convo(body, trace.events);
+        else if (this.tab === "explorer") renderTraceExplorer(body, trace, this);
         else if (this.tab === "trajectory") this.traj(body, trace.events);
         else rawView(body, trace);
       }
@@ -1159,64 +1754,6 @@ var require_views = __commonJS({
           text: "Trace changed on disk. Refresh to read the new records."
         });
         if (body) body.before(notice);
-      }
-    };
-    var JsonView2 = class extends TextFileView {
-      getViewType() {
-        return VJ2;
-      }
-      getDisplayText() {
-        return this.file?.basename || "JSON viewer";
-      }
-      getIcon() {
-        return "braces";
-      }
-      setViewData(data) {
-        this.data = data;
-        this.render();
-      }
-      getViewData() {
-        return this.data;
-      }
-      clear() {
-        this.data = "";
-        this.contentEl.empty();
-      }
-      render() {
-        const rootEl = this.contentEl;
-        rootEl.empty();
-        rootEl.addClass("atr-json");
-        const header = rootEl.createDiv({ cls: "atr-header" });
-        header.createEl("h2", { text: this.file?.name || "JSON" });
-        copyButton(header, "Copy JSON", () => this.data, { text: "Copy" });
-        const extension = this.file?.extension?.toLowerCase() || "json";
-        if (extension === "jsonl" || extension === "ndjson") {
-          const lines = this.data.split(/\r?\n/).filter((line) => line.trim());
-          lines.slice(0, JLIM).forEach((line, index) => {
-            const record = rootEl.createEl("details", { cls: "atr-json-record" });
-            const summary = record.createEl("summary");
-            summary.createSpan({ text: `line ${index + 1}` });
-            copyButton(summary, "Copy record", () => line);
-            try {
-              jsonTree(record, JSON.parse(line), "root", this);
-            } catch {
-              record.createEl("pre", { text: line });
-            }
-          });
-          if (lines.length > JLIM) {
-            rootEl.createDiv({
-              cls: "atr-warning",
-              text: `${(lines.length - JLIM).toLocaleString()} records hidden for performance.`
-            });
-          }
-          return;
-        }
-        try {
-          jsonTree(rootEl, JSON.parse(this.data), "root", this);
-        } catch (error) {
-          rootEl.createDiv({ cls: "atr-error", text: `JSON parse error: ${err(error)}` });
-          rootEl.createEl("pre", { text: this.data });
-        }
       }
     };
     function processBlock(parent, events, comp, compact) {
@@ -1328,7 +1865,7 @@ var require_views = __commonJS({
           return;
         }
         if (hydrated.content !== void 0) smart(parent, hydrated.content, comp);
-        if (hydrated.raw !== void 0) jsonTree(parent, hydrated.raw, "raw", comp);
+        if (hydrated.raw !== void 0) renderJsonTree(parent, hydrated.raw, "raw", comp);
       } catch (error) {
         parent.createDiv({ cls: "atr-error", text: `Could not load event: ${err(error)}` });
       }
@@ -1359,7 +1896,7 @@ var require_views = __commonJS({
         } else if (mode === "Raw") {
           output.createEl("pre", { cls: "atr-plain-text", text: JSON.stringify(value) });
         } else {
-          jsonTree(output, parsed, "root", comp);
+          renderJsonTree(output, parsed, "root", comp);
         }
       };
       for (const mode of modes) {
@@ -1374,39 +1911,6 @@ var require_views = __commonJS({
       details.addEventListener("toggle", () => {
         if (details.open && !rendered) render(active);
       });
-    }
-    function jsonTree(parent, value, label, comp) {
-      if (Array.isArray(value)) {
-        const branch = parent.createEl("details", { cls: "atr-json-branch", attr: { open: "" } });
-        const summary = branch.createEl("summary");
-        summary.createSpan({ text: `${label}  [${value.length}]` });
-        copyButton(summary, "Copy JSON", () => JSON.stringify(value, null, 2));
-        value.forEach((item, index) => jsonTree(branch, item, `[${index}]`, comp));
-        return;
-      }
-      if (obj(value)) {
-        const entries = Object.entries(value);
-        const branch = parent.createEl("details", { cls: "atr-json-branch", attr: { open: "" } });
-        const summary = branch.createEl("summary");
-        summary.createSpan({ text: `${label}  {${entries.length}}` });
-        copyButton(summary, "Copy JSON", () => JSON.stringify(value, null, 2));
-        entries.forEach(([key, item]) => jsonTree(branch, item, key, comp));
-        return;
-      }
-      const row = parent.createDiv({ cls: "atr-json-leaf" });
-      row.createSpan({ cls: "atr-json-key", text: label });
-      row.createSpan({ cls: "atr-json-type", text: value === null ? "null" : typeof value });
-      if (typeof value === "string" && (value.length >= SMART || /\r?\n/.test(value))) {
-        const smartEl = row.createDiv({ cls: "atr-json-smart" });
-        smart(smartEl, value, comp);
-      } else {
-        row.createSpan({
-          cls: "atr-json-value",
-          text: typeof value === "string" ? value : JSON.stringify(value)
-        });
-        const copy = copyButton(row, "Copy value", () => jsonValueText(value));
-        copy.addClass("atr-json-copy");
-      }
     }
     function rawView(parent, trace) {
       const wrap = parent.createDiv({ cls: "atr-raw-view" });
@@ -1517,9 +2021,6 @@ var require_views = __commonJS({
       if (hydrated?.content !== void 0) return hydrated.content;
       if (hydrated?.raw !== void 0) return JSON.stringify(hydrated.raw, null, 2);
       return hydrated?.title || event.title || "";
-    }
-    function jsonValueText(value) {
-      return typeof value === "string" ? value : JSON.stringify(value);
     }
     module2.exports = { Settings: Settings2, Sessions: Sessions2, Trace: Trace2, JsonView: JsonView2 };
   }
