@@ -1,7 +1,7 @@
 "use strict";
 const assert = require("node:assert/strict");
 const test = require("node:test");
-const { captureViewport, findScrollContainer, restoreViewport } = require("../src/trace-viewport");
+const { captureViewport, findScrollContainer, restoreViewport, readingScrollers, isNearLiveEdge, scrollToLiveEdge } = require("../src/trace-viewport");
 
 function fixture() {
   const scroller = {
@@ -88,4 +88,53 @@ test("restores nested Explorer list and inspector scrolling", () => {
   assert.equal(list.scrollTop, 180);
   assert.equal(details.scrollTop, 420);
   assert.equal(details.scrollLeft, 14);
+});
+
+test("auto-follow does not redraw while the user reads an earlier scroll position", () => {
+  const { scroller, root } = fixture();
+  scroller.scrollTop = 420; // total scrollable range is 2900, far from bottom
+  assert.equal(isNearLiveEdge(root), false);
+  assert.equal(readingScrollers(root)[0], scroller);
+});
+
+test("auto-follow resumes when the reader reaches the live edge", () => {
+  const { scroller, root } = fixture();
+  scroller.scrollTop = scroller.scrollHeight - scroller.clientHeight - 60;
+  assert.equal(isNearLiveEdge(root), true);
+  scroller.scrollTop = 0;
+  scrollToLiveEdge(root);
+  assert.equal(scroller.scrollTop, 2900);
+});
+
+test("Explorer search or filtered events prevents automatic replacement", () => {
+  const { root, scroller } = fixture();
+  scroller.scrollTop = 2900;
+  const base = root.querySelector;
+  root.querySelector = selector => {
+    if (selector === ".atr-explorer-search") return { value: "exec_command" };
+    if (selector === ".atr-explorer-filter") return { value: "all" };
+    return base(selector);
+  };
+  assert.equal(isNearLiveEdge(root), false);
+  root.querySelector = selector => {
+    if (selector === ".atr-explorer-search") return { value: "" };
+    if (selector === ".atr-explorer-filter") return { value: "tool-call" };
+    return base(selector);
+  };
+  assert.equal(isNearLiveEdge(root), false);
+});
+
+test("Explorer nested scrollers must both be at the live edge", () => {
+  const { root, scroller } = fixture();
+  scroller.scrollTop = 2900;
+  const list = { scrollTop: 50, scrollHeight: 2000, clientHeight: 500 };
+  const inspector = { scrollTop: 0, scrollHeight: 900, clientHeight: 400 };
+  const base = root.querySelector;
+  root.querySelector = selector => selector === ".atr-explorer-tree" ? list :
+    selector === ".atr-explorer-inspector-content" ? inspector : base(selector);
+  assert.equal(isNearLiveEdge(root), false);
+  list.scrollTop = 1500;
+  assert.equal(isNearLiveEdge(root), false);
+  inspector.scrollTop = 500;
+  assert.equal(isNearLiveEdge(root), true);
 });
