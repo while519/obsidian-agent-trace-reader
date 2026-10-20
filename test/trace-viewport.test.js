@@ -69,3 +69,23 @@ test("ignores missing snapshots and tolerates no anchored events", () => {
   assert.equal(snapshot.anchor, null);
   assert.doesNotThrow(() => restoreViewport(root, null));
 });
+
+test("restores nested Explorer list and inspector scrolling", () => {
+  const { root } = fixture();
+  const list = { scrollTop: 180, scrollLeft: 0 };
+  const details = { scrollTop: 420, scrollLeft: 14 };
+  const baseQuery = root.querySelectorAll;
+  root.querySelectorAll = selector => {
+    if (selector === ".atr-explorer-tree") return [list];
+    if (selector === ".atr-explorer-inspector-content") return [details];
+    return baseQuery(selector);
+  };
+  const snapshot = captureViewport(root);
+  list.scrollTop = 0;
+  details.scrollTop = 0;
+  details.scrollLeft = 0;
+  restoreViewport(root, snapshot);
+  assert.equal(list.scrollTop, 180);
+  assert.equal(details.scrollTop, 420);
+  assert.equal(details.scrollLeft, 14);
+});
