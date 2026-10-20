@@ -45,11 +45,16 @@ function captureViewport(root) {
       distance = diff;
     }
   }
+  const internalScroll = [".atr-explorer-tree", ".atr-explorer-inspector-content"]
+    .flatMap(selector => Array.from(root.querySelectorAll(selector)).map((element, index) => ({
+      selector, index, scrollTop: element.scrollTop, scrollLeft: element.scrollLeft,
+    })));
   return {
     scroll,
     scrollTop: scroll.scrollTop,
     scrollLeft: scroll.scrollLeft,
     anchor: chosen,
+    internalScroll,
   };
 }
 
@@ -59,10 +64,17 @@ function restoreViewport(root, snapshot) {
   scroll.scrollTop = snapshot.scrollTop;
   scroll.scrollLeft = snapshot.scrollLeft;
   const element = findAnchor(root, snapshot.anchor?.id);
-  if (!element) return;
-  const next = element.getBoundingClientRect().top;
-  const expected = scroll.getBoundingClientRect().top + snapshot.anchor.offset;
-  scroll.scrollTop += next - expected;
+  if (element) {
+    const next = element.getBoundingClientRect().top;
+    const expected = scroll.getBoundingClientRect().top + snapshot.anchor.offset;
+    scroll.scrollTop += next - expected;
+  }
+  for (const item of snapshot.internalScroll || []) {
+    const current = root.querySelectorAll(item.selector)[item.index];
+    if (!current) continue;
+    current.scrollTop = item.scrollTop;
+    current.scrollLeft = item.scrollLeft;
+  }
 }
 
 module.exports = { findScrollContainer, captureViewport, restoreViewport };
