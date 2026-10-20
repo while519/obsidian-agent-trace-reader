@@ -11,6 +11,7 @@ const shared = require("./shared");
 const source = require("./sources/codex");
 const { JsonView, renderJsonTree } = require("./json-explorer");
 const { renderTraceExplorer } = require("./trace-explorer");
+const { captureViewport, restoreViewport } = require("./trace-viewport");
 const {
   VS,
   VT,
@@ -241,6 +242,7 @@ class Trace extends ItemView {
     this.fileWatcher = null;
     this.watchTimer = null;
     this.fileStamp = null;
+    this.renderedFilePath = "";
   }
 
   getViewType() {
@@ -257,7 +259,11 @@ class Trace extends ItemView {
 
   async setState(state, result) {
     await super.setState(state, result);
-    if (this.filePath && state?.filePath !== this.filePath) this.stopWatching();
+    if (this.filePath && state?.filePath !== this.filePath) {
+      this.stopWatching();
+      this.trace = null;
+      this.renderedFilePath = "";
+    }
     this.filePath = state && typeof state.filePath === "string" ? state.filePath : "";
     await this.load();
   }
@@ -276,27 +282,55 @@ class Trace extends ItemView {
 
   async load() {
     const serial = ++this.loadSerial;
+    const filePath = this.filePath;
+    const hasExistingView = Boolean(this.trace && this.renderedFilePath === filePath);
+    const viewport = hasExistingView ? captureViewport(this.contentEl) : null;
     this.loading = true;
-    this.contentEl.empty();
-    this.contentEl.addClass("atr-trace");
-    this.contentEl.createDiv({ cls: "atr-loading", text: "Loading trace…" });
+
+    // Keep the existing trace readable while parsing a refreshed snapshot.
+    // The loading placeholder is only used when opening a different file.
+    if (hasExistingView) {
+      this.updateRefreshState();
+    } else {
+      this.contentEl.empty();
+      this.contentEl.addClass("atr-trace");
+      this.contentEl.createDiv({ cls: "atr-loading", text: "Loading trace…" });
+    }
 
     try {
-      const trace = await parseTraceFile(this.filePath);
+      const trace = await parseTraceFile(filePath);
       if (serial !== this.loadSerial) return;
       this.trace = trace;
+      this.renderedFilePath = filePath;
       this.loading = false;
       this.changed = false;
       this.render();
+      if (viewport) restoreViewport(this.contentEl, viewport);
       this.startWatching();
     } catch (error) {
       if (serial !== this.loadSerial) return;
       this.loading = false;
-      this.trace = null;
-      this.contentEl.empty();
-      this.contentEl.addClass("atr-trace");
-      this.contentEl.createDiv({ cls: "atr-error", text: `Could not read trace: ${err(error)}` });
+      if (hasExistingView) {
+        this.updateRefreshState();
+        new Notice(`Could not refresh trace: ${err(error)}`);
+      } else {
+        this.trace = null;
+        this.renderedFilePath = "";
+        this.contentEl.empty();
+        this.contentEl.addClass("atr-trace");
+        this.contentEl.createDiv({ cls: "atr-error", text: `Could not read trace: ${err(error)}` });
+      }
     }
+  }
+
+  updateRefreshState() {
+    const refresh = this.contentEl.querySelector(".atr-trace-refresh");
+    if (!refresh) return;
+    refresh.disabled = this.loading;
+    refresh.toggleClass("is-loading", this.loading);
+    refresh.setAttribute("aria-busy", String(this.loading));
+    const label = refresh.querySelector(".atr-refresh-label");
+    if (label) label.textContent = this.loading ? "Refreshing…" : "Refresh";
   }
 
   render() {
@@ -316,21 +350,9 @@ class Trace extends ItemView {
     if (trace.isLarge) meta.createSpan({ text: `${formatBytes(trace.fileSize)} · streamed` });
     copyButton(meta, "Copy trace path", () => this.filePath);
 
-    const controls = header.createDiv({ cls: "atr-trace-controls" });
-    const refresh = btn(controls, "refresh-cw", "Refresh trace");
-    refresh.disabled = this.loading;
-    refresh.onclick = () => this.load();
-    const follow = btn(controls, "radio", "Auto-follow trace");
-    follow.addClass("atr-follow-toggle");
-    follow.createSpan({ text: "Auto" });
-    follow.toggleClass("is-active", this.autoFollow);
-    follow.onclick = () => {
-      this.autoFollow = !this.autoFollow;
-      const refreshNow = this.autoFollow && this.changed;
-      this.render();
-      if (refreshNow) this.load();
-    };
-    const tabs = controls.createDiv({ cls: "atr-tabs" });
+    // A separate sticky toolbar remains reachable throughout long traces.
+    const toolbar = rootEl.createDiv({ cls: "atr-trace-toolbar" });
+    const tabs = toolbar.createDiv({ cls: "atr-tabs" });
     for (const tab of ["conversation", "explorer", "trajectory", "raw"]) {
       const tabEl = tabs.createEl("button", {
         cls: `atr-tab${this.tab === tab ? " is-active" : ""}`,
@@ -341,6 +363,22 @@ class Trace extends ItemView {
         this.render();
       };
     }
+    const controls = toolbar.createDiv({ cls: "atr-trace-controls" });
+    const follow = btn(controls, "radio", "Auto-follow trace");
+    follow.addClass("atr-follow-toggle");
+    follow.createSpan({ text: "Auto" });
+    follow.toggleClass("is-active", this.autoFollow);
+    follow.onclick = () => {
+      this.autoFollow = !this.autoFollow;
+      const refreshNow = this.autoFollow && this.changed;
+      this.render();
+      if (refreshNow) this.load();
+    };
+    const refresh = btn(controls, "refresh-cw", "Refresh trace");
+    refresh.addClass("atr-trace-refresh");
+    refresh.createSpan({ cls: "atr-refresh-label", text: "Refresh" });
+    refresh.onclick = () => this.load();
+    this.updateRefreshState();
 
     if (trace.errors.length) {
       rootEl.createDiv({
@@ -469,6 +507,7 @@ class Trace extends ItemView {
 
 function processBlock(parent, events, comp, compact) {
   const details = parent.createEl("details", { cls: "atr-process" });
+  if (events.length) details.setAttribute("data-atr-anchor", `process-${events[0].index}`);
   if (!compact) details.open = true;
   const summary = details.createEl("summary");
   summary.createSpan({
@@ -507,6 +546,7 @@ function processBlock(parent, events, comp, compact) {
 
 function card(parent, event, comp) {
   const cardEl = parent.createDiv({ cls: `atr-message atr-message-${event.kind}` });
+  cardEl.setAttribute("data-atr-anchor", `event-${event.index}`);
   const header = cardEl.createDiv({ cls: "atr-message-header" });
   const headerMain = header.createDiv({ cls: "atr-message-header-main" });
   headerMain.createSpan({ cls: "atr-message-role", text: (event.role || event.kind).toUpperCase() });
@@ -560,6 +600,7 @@ function messageBody(parent, value, comp) {
 
 function eventRow(parent, event, comp) {
   const details = parent.createEl("details", { cls: `atr-trajectory-row atr-kind-${event.kind}` });
+  details.setAttribute("data-atr-anchor", `event-${event.index}`);
   const summary = details.createEl("summary");
   summary.createSpan({ cls: "atr-event-index", text: String(event.index + 1).padStart(3, "0") });
   summary.createSpan({ cls: "atr-event-time", text: event.timestamp ? time(event.timestamp) : "—" });
@@ -669,6 +710,7 @@ function rawView(parent, trace) {
       const line = trace.raw !== undefined ? rawLines[cursor] || "" : readLineRef(trace.lineRefs[cursor]);
       loadedLines.push(line);
       const lineEl = pre.createDiv({ cls: "atr-raw-line" });
+      lineEl.setAttribute("data-atr-anchor", `line-${cursor + 1}`);
       lineEl.createSpan({ cls: "atr-line-number", text: String(cursor + 1) });
       lineEl.createSpan({ cls: "atr-line-content", text: line });
     }
