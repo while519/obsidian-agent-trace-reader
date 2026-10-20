@@ -123,6 +123,7 @@ function renderTraceExplorer(parent, trace, view) {
         for (; cursor < end; cursor++) {
           const event = matching[cursor], pair = pairs.get(event.index);
           const row = list.createEl("button", { cls: "atr-explorer-row", attr: { type: "button" } });
+          row.setAttribute("data-atr-anchor", `event-${event.index}`);
           if (current === event) row.addClass("is-active");
           const line = row.createDiv({ cls: "atr-explorer-row-line" });
           line.createSpan({ cls: "atr-explorer-kind atr-explorer-kind-" + event.kind, text: event.kind });
