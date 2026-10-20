@@ -77,4 +77,40 @@ function restoreViewport(root, snapshot) {
   }
 }
 
-module.exports = { findScrollContainer, captureViewport, restoreViewport };
+/**
+ * Auto-follow is active only at the live edge. When the reader is inspecting
+ * older content, new file writes are noted without replacing the DOM.
+ */
+function readingScrollers(root) {
+  const scroll = findScrollContainer(root);
+  const result = [scroll];
+  for (const selector of [".atr-explorer-tree", ".atr-explorer-inspector-content"]) {
+    const panel = root.querySelector?.(selector);
+    if (panel) result.push(panel);
+  }
+  return [...new Set(result)];
+}
+
+function nearBottom(scroll, tolerance = 96) {
+  if (!scroll || !Number.isFinite(Number(scroll.scrollHeight)) || !Number.isFinite(Number(scroll.clientHeight))) return false;
+  return scroll.scrollHeight - scroll.clientHeight - scroll.scrollTop <= tolerance;
+}
+
+function isNearLiveEdge(root, tolerance = 96) {
+  // Do not silently replace a filtered Explorer search while the user examines it.
+  const query = root.querySelector?.(".atr-explorer-search");
+  const filter = root.querySelector?.(".atr-explorer-filter");
+  if (query?.value?.trim() || (filter && filter.value !== "all")) return false;
+  return readingScrollers(root).every(node => nearBottom(node, tolerance));
+}
+
+function scrollToLiveEdge(root) {
+  for (const scroll of readingScrollers(root)) {
+    scroll.scrollTop = Math.max(0, scroll.scrollHeight - scroll.clientHeight);
+  }
+}
+
+module.exports = {
+  findScrollContainer, captureViewport, restoreViewport,
+  readingScrollers, isNearLiveEdge, scrollToLiveEdge,
+};
