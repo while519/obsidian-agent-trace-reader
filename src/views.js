@@ -284,7 +284,6 @@ class Trace extends ItemView {
     const serial = ++this.loadSerial;
     const filePath = this.filePath;
     const hasExistingView = Boolean(this.trace && this.renderedFilePath === filePath);
-    const viewport = hasExistingView ? captureViewport(this.contentEl) : null;
     this.loading = true;
 
     // Keep the existing trace readable while parsing a refreshed snapshot.
@@ -300,6 +299,8 @@ class Trace extends ItemView {
     try {
       const trace = await parseTraceFile(filePath);
       if (serial !== this.loadSerial) return;
+      // Snapshot at commit time so scrolling during the async parse is respected.
+      const viewport = hasExistingView ? captureViewport(this.contentEl) : null;
       this.trace = trace;
       this.renderedFilePath = filePath;
       this.loading = false;
