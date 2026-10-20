@@ -1460,7 +1460,38 @@ var require_trace_viewport = __commonJS({
         current.scrollLeft = item.scrollLeft;
       }
     }
-    module2.exports = { findScrollContainer, captureViewport, restoreViewport };
+    function readingScrollers(root) {
+      const scroll = findScrollContainer(root);
+      const result = [scroll];
+      for (const selector of [".atr-explorer-tree", ".atr-explorer-inspector-content"]) {
+        const panel = root.querySelector?.(selector);
+        if (panel) result.push(panel);
+      }
+      return [...new Set(result)];
+    }
+    function nearBottom(scroll, tolerance = 96) {
+      if (!scroll || !Number.isFinite(Number(scroll.scrollHeight)) || !Number.isFinite(Number(scroll.clientHeight))) return false;
+      return scroll.scrollHeight - scroll.clientHeight - scroll.scrollTop <= tolerance;
+    }
+    function isNearLiveEdge(root, tolerance = 96) {
+      const query = root.querySelector?.(".atr-explorer-search");
+      const filter = root.querySelector?.(".atr-explorer-filter");
+      if (query?.value?.trim() || filter && filter.value !== "all") return false;
+      return readingScrollers(root).every((node) => nearBottom(node, tolerance));
+    }
+    function scrollToLiveEdge(root) {
+      for (const scroll of readingScrollers(root)) {
+        scroll.scrollTop = Math.max(0, scroll.scrollHeight - scroll.clientHeight);
+      }
+    }
+    module2.exports = {
+      findScrollContainer,
+      captureViewport,
+      restoreViewport,
+      readingScrollers,
+      isNearLiveEdge,
+      scrollToLiveEdge
+    };
   }
 });
 
@@ -1480,7 +1511,7 @@ var require_views = __commonJS({
     var source = require_codex();
     var { JsonView: JsonView2, renderJsonTree } = require_json_explorer();
     var { renderTraceExplorer } = require_trace_explorer();
-    var { captureViewport, restoreViewport } = require_trace_viewport();
+    var { captureViewport, restoreViewport, readingScrollers, isNearLiveEdge, scrollToLiveEdge } = require_trace_viewport();
     var {
       VS: VS2,
       VT: VT2,
@@ -1682,6 +1713,12 @@ var require_views = __commonJS({
         this.watchTimer = null;
         this.fileStamp = null;
         this.renderedFilePath = "";
+        this.autoResumeTargets = [];
+        this.autoResumeHandler = () => {
+          if (this.autoFollow && this.changed && !this.loading && isNearLiveEdge(this.contentEl)) {
+            this.load({ auto: true });
+          }
+        };
       }
       getViewType() {
         return VT2;
@@ -1695,6 +1732,7 @@ var require_views = __commonJS({
       async setState(state, result) {
         await super.setState(state, result);
         if (this.filePath && state?.filePath !== this.filePath) {
+          this.unbindAutoResume();
           this.stopWatching();
           this.trace = null;
           this.renderedFilePath = "";
@@ -1709,9 +1747,10 @@ var require_views = __commonJS({
         if (this.filePath) await this.load();
       }
       async onClose() {
+        this.unbindAutoResume();
         this.stopWatching();
       }
-      async load() {
+      async load(options = {}) {
         const serial = ++this.loadSerial;
         const filePath = this.filePath;
         const hasExistingView = Boolean(this.trace && this.renderedFilePath === filePath);
@@ -1726,13 +1765,22 @@ var require_views = __commonJS({
         try {
           const trace = await parseTraceFile(filePath);
           if (serial !== this.loadSerial) return;
+          if (options.auto && hasExistingView && !isNearLiveEdge(this.contentEl)) {
+            this.loading = false;
+            this.changed = true;
+            this.updateRefreshState();
+            this.updateChangeIndicator();
+            return;
+          }
           const viewport = hasExistingView ? captureViewport(this.contentEl) : null;
+          const followLatest = options.auto && hasExistingView && isNearLiveEdge(this.contentEl);
           this.trace = trace;
           this.renderedFilePath = filePath;
           this.loading = false;
           this.changed = false;
           this.render();
-          if (viewport) restoreViewport(this.contentEl, viewport);
+          if (followLatest) scrollToLiveEdge(this.contentEl);
+          else if (viewport) restoreViewport(this.contentEl, viewport);
           this.startWatching();
         } catch (error) {
           if (serial !== this.loadSerial) return;
@@ -1749,6 +1797,26 @@ var require_views = __commonJS({
           }
         }
       }
+      updateChangeIndicator() {
+        const indicator = this.contentEl.querySelector(".atr-trace-pending");
+        if (!indicator) return;
+        const pending = this.changed && this.autoFollow && !isNearLiveEdge(this.contentEl);
+        indicator.toggleClass("is-visible", pending);
+        indicator.textContent = pending ? "New records \xB7 Auto paused while reading" : "";
+      }
+      bindAutoResume() {
+        this.unbindAutoResume();
+        this.autoResumeTargets = readingScrollers(this.contentEl);
+        for (const target of this.autoResumeTargets) {
+          target.addEventListener?.("scroll", this.autoResumeHandler, { passive: true });
+        }
+      }
+      unbindAutoResume() {
+        for (const target of this.autoResumeTargets) {
+          target.removeEventListener?.("scroll", this.autoResumeHandler);
+        }
+        this.autoResumeTargets = [];
+      }
       updateRefreshState() {
         const refresh = this.contentEl.querySelector(".atr-trace-refresh");
         if (!refresh) return;
@@ -1759,6 +1827,7 @@ var require_views = __commonJS({
         if (label) label.textContent = this.loading ? "Refreshing\u2026" : "Refresh";
       }
       render() {
+        this.unbindAutoResume();
         const rootEl = this.contentEl;
         rootEl.empty();
         rootEl.addClass("atr-trace");
@@ -1792,14 +1861,20 @@ var require_views = __commonJS({
         follow.toggleClass("is-active", this.autoFollow);
         follow.onclick = () => {
           this.autoFollow = !this.autoFollow;
-          const refreshNow = this.autoFollow && this.changed;
-          this.render();
-          if (refreshNow) this.load();
+          follow.toggleClass("is-active", this.autoFollow);
+          follow.setAttribute("aria-pressed", String(this.autoFollow));
+          this.updateChangeIndicator();
+          if (this.autoFollow && this.changed && !this.loading && isNearLiveEdge(this.contentEl)) {
+            this.load({ auto: true });
+          }
         };
+        follow.setAttribute("aria-pressed", String(this.autoFollow));
         const refresh = btn(controls, "refresh-cw", "Refresh trace");
         refresh.addClass("atr-trace-refresh");
         refresh.createSpan({ cls: "atr-refresh-label", text: "Refresh" });
         refresh.onclick = () => this.load();
+        const pending = controls.createSpan({ cls: "atr-trace-pending", text: "" });
+        pending.setAttribute("aria-live", "polite");
         this.updateRefreshState();
         if (trace.errors.length) {
           rootEl.createDiv({
@@ -1821,6 +1896,8 @@ var require_views = __commonJS({
         else if (this.tab === "explorer") renderTraceExplorer(body, trace, this);
         else if (this.tab === "trajectory") this.traj(body, trace.events);
         else rawView(body, trace);
+        this.bindAutoResume();
+        this.updateChangeIndicator();
       }
       convo(parent, events) {
         const use = conversationEvents(events);
@@ -1899,8 +1976,12 @@ var require_views = __commonJS({
           if (!next || sameStamp(next, this.fileStamp)) return;
           this.fileStamp = next;
           this.changed = true;
-          if (this.autoFollow && !this.loading) this.load();
-          else if (!this.loading && this.trace) this.showChangedNotice();
+          if (this.autoFollow) {
+            if (!this.loading && isNearLiveEdge(this.contentEl)) this.load({ auto: true });
+            else this.updateChangeIndicator();
+          } else if (!this.loading && this.trace) {
+            this.showChangedNotice();
+          }
         }, 180);
       }
       showChangedNotice() {
