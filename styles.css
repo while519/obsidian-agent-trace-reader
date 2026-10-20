@@ -298,6 +298,18 @@
   overflow-x: auto;
 }
 
+.atr-trace-pending {
+  display: none;
+  color: var(--text-warning);
+  font-size: .76em;
+  max-width: 220px;
+  line-height: 1.2;
+}
+
+.atr-trace-pending.is-visible {
+  display: inline;
+}
+
 .atr-trace-refresh {
   display: inline-flex;
   align-items: center;
