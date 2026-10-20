@@ -11,7 +11,7 @@ const shared = require("./shared");
 const source = require("./sources/codex");
 const { JsonView, renderJsonTree } = require("./json-explorer");
 const { renderTraceExplorer } = require("./trace-explorer");
-const { captureViewport, restoreViewport } = require("./trace-viewport");
+const { captureViewport, restoreViewport, readingScrollers, isNearLiveEdge, scrollToLiveEdge } = require("./trace-viewport");
 const {
   VS,
   VT,
@@ -243,6 +243,12 @@ class Trace extends ItemView {
     this.watchTimer = null;
     this.fileStamp = null;
     this.renderedFilePath = "";
+    this.autoResumeTargets = [];
+    this.autoResumeHandler = () => {
+      if (this.autoFollow && this.changed && !this.loading && isNearLiveEdge(this.contentEl)) {
+        this.load({ auto: true });
+      }
+    };
   }
 
   getViewType() {
@@ -260,6 +266,7 @@ class Trace extends ItemView {
   async setState(state, result) {
     await super.setState(state, result);
     if (this.filePath && state?.filePath !== this.filePath) {
+      this.unbindAutoResume();
       this.stopWatching();
       this.trace = null;
       this.renderedFilePath = "";
@@ -277,10 +284,11 @@ class Trace extends ItemView {
   }
 
   async onClose() {
+    this.unbindAutoResume();
     this.stopWatching();
   }
 
-  async load() {
+  async load(options = {}) {
     const serial = ++this.loadSerial;
     const filePath = this.filePath;
     const hasExistingView = Boolean(this.trace && this.renderedFilePath === filePath);
@@ -299,14 +307,25 @@ class Trace extends ItemView {
     try {
       const trace = await parseTraceFile(filePath);
       if (serial !== this.loadSerial) return;
+      // If the user scrolled into history during an automatic refresh, keep
+      // the DOM untouched and apply new data only when they return to the end.
+      if (options.auto && hasExistingView && !isNearLiveEdge(this.contentEl)) {
+        this.loading = false;
+        this.changed = true;
+        this.updateRefreshState();
+        this.updateChangeIndicator();
+        return;
+      }
       // Snapshot at commit time so scrolling during the async parse is respected.
       const viewport = hasExistingView ? captureViewport(this.contentEl) : null;
+      const followLatest = options.auto && hasExistingView && isNearLiveEdge(this.contentEl);
       this.trace = trace;
       this.renderedFilePath = filePath;
       this.loading = false;
       this.changed = false;
       this.render();
-      if (viewport) restoreViewport(this.contentEl, viewport);
+      if (followLatest) scrollToLiveEdge(this.contentEl);
+      else if (viewport) restoreViewport(this.contentEl, viewport);
       this.startWatching();
     } catch (error) {
       if (serial !== this.loadSerial) return;
@@ -324,6 +343,29 @@ class Trace extends ItemView {
     }
   }
 
+  updateChangeIndicator() {
+    const indicator = this.contentEl.querySelector(".atr-trace-pending");
+    if (!indicator) return;
+    const pending = this.changed && this.autoFollow && !isNearLiveEdge(this.contentEl);
+    indicator.toggleClass("is-visible", pending);
+    indicator.textContent = pending ? "New records · Auto paused while reading" : "";
+  }
+
+  bindAutoResume() {
+    this.unbindAutoResume();
+    this.autoResumeTargets = readingScrollers(this.contentEl);
+    for (const target of this.autoResumeTargets) {
+      target.addEventListener?.("scroll", this.autoResumeHandler, { passive: true });
+    }
+  }
+
+  unbindAutoResume() {
+    for (const target of this.autoResumeTargets) {
+      target.removeEventListener?.("scroll", this.autoResumeHandler);
+    }
+    this.autoResumeTargets = [];
+  }
+
   updateRefreshState() {
     const refresh = this.contentEl.querySelector(".atr-trace-refresh");
     if (!refresh) return;
@@ -335,6 +377,7 @@ class Trace extends ItemView {
   }
 
   render() {
+    this.unbindAutoResume();
     const rootEl = this.contentEl;
     rootEl.empty();
     rootEl.addClass("atr-trace");
@@ -371,14 +414,20 @@ class Trace extends ItemView {
     follow.toggleClass("is-active", this.autoFollow);
     follow.onclick = () => {
       this.autoFollow = !this.autoFollow;
-      const refreshNow = this.autoFollow && this.changed;
-      this.render();
-      if (refreshNow) this.load();
+      follow.toggleClass("is-active", this.autoFollow);
+      follow.setAttribute("aria-pressed", String(this.autoFollow));
+      this.updateChangeIndicator();
+      if (this.autoFollow && this.changed && !this.loading && isNearLiveEdge(this.contentEl)) {
+        this.load({ auto: true });
+      }
     };
+    follow.setAttribute("aria-pressed", String(this.autoFollow));
     const refresh = btn(controls, "refresh-cw", "Refresh trace");
     refresh.addClass("atr-trace-refresh");
     refresh.createSpan({ cls: "atr-refresh-label", text: "Refresh" });
     refresh.onclick = () => this.load();
+    const pending = controls.createSpan({ cls: "atr-trace-pending", text: "" });
+    pending.setAttribute("aria-live", "polite");
     this.updateRefreshState();
 
     if (trace.errors.length) {
@@ -402,6 +451,8 @@ class Trace extends ItemView {
     else if (this.tab === "explorer") renderTraceExplorer(body, trace, this);
     else if (this.tab === "trajectory") this.traj(body, trace.events);
     else rawView(body, trace);
+    this.bindAutoResume();
+    this.updateChangeIndicator();
   }
 
   convo(parent, events) {
@@ -490,8 +541,12 @@ class Trace extends ItemView {
       if (!next || sameStamp(next, this.fileStamp)) return;
       this.fileStamp = next;
       this.changed = true;
-      if (this.autoFollow && !this.loading) this.load();
-      else if (!this.loading && this.trace) this.showChangedNotice();
+      if (this.autoFollow) {
+        if (!this.loading && isNearLiveEdge(this.contentEl)) this.load({ auto: true });
+        else this.updateChangeIndicator();
+      } else if (!this.loading && this.trace) {
+        this.showChangedNotice();
+      }
     }, 180);
   }
 
