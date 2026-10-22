@@ -12,6 +12,7 @@ const source = require("./sources/codex");
 const { JsonView, renderJsonTree } = require("./json-explorer");
 const { renderTraceExplorer } = require("./trace-explorer");
 const { captureViewport, restoreViewport, readingScrollers, isNearLiveEdge, scrollToLiveEdge } = require("./trace-viewport");
+const { commandText, isCommandTool, copyLabelForEvent } = require("./trace-copy");
 const {
   VS,
   VT,
@@ -607,7 +608,21 @@ function card(parent, event, comp) {
   const headerMain = header.createDiv({ cls: "atr-message-header-main" });
   headerMain.createSpan({ cls: "atr-message-role", text: (event.role || event.kind).toUpperCase() });
   if (event.timestamp) headerMain.createSpan({ cls: "atr-message-time", text: time(event.timestamp) });
-  copyButton(header, "Copy message", () => eventCopyText(event));
+  if (event.kind === "tool-call") {
+    const hasCommand = isCommandTool(event) || commandText(event) !== undefined;
+    if (hasCommand) {
+      copyButton(header, "Copy tool command", () => {
+        const hydrated = hydrateEvent(event);
+        return commandText(hydrated) ?? eventInputTextFromHydrated(hydrated, event);
+      }, { text: "Command" });
+    }
+    copyButton(header, "Copy tool input", () => eventInputText(event), { text: "Input" });
+  } else {
+    const label = copyLabelForEvent(event);
+    copyButton(header, label, () => eventCopyText(event), {
+      text: event.kind === "tool-result" ? "Copy result" : "Copy",
+    });
+  }
 
   if (event.content !== undefined) {
     const body = cardEl.createDiv({ cls: "atr-message-body" });
@@ -665,7 +680,7 @@ function eventRow(parent, event, comp) {
     ? `${event.title} · ${formatChars(event.contentLength)}`
     : event.title;
   summary.createSpan({ cls: "atr-event-title", text: title });
-  const copy = copyButton(summary, "Copy event", () => eventCopyText(event));
+  const copy = copyButton(summary, copyLabelForEvent(event), () => eventCopyText(event));
   copy.addClass("atr-event-copy");
   const content = details.createDiv({ cls: "atr-event-details" });
   let loaded = false;
@@ -729,7 +744,7 @@ function smart(parent, value, comp) {
       render(mode);
     };
   }
-  copyButton(bar, "Copy string", () => value);
+  copyButton(bar, "Copy full content", () => value, { text: "Copy content" });
   details.addEventListener("toggle", () => {
     if (details.open && !rendered) render(active);
   });
@@ -852,6 +867,18 @@ function eventCopyText(event) {
 }
 
 function eventCopyTextFromHydrated(hydrated, event) {
+  if (event?.kind === "tool-call") {
+    const command = commandText(hydrated || event);
+    if (command !== undefined) return command;
+  }
+  return eventInputTextFromHydrated(hydrated, event);
+}
+
+function eventInputText(event) {
+  return eventInputTextFromHydrated(hydrateEvent(event), event);
+}
+
+function eventInputTextFromHydrated(hydrated, event) {
   if (hydrated?.content !== undefined) return hydrated.content;
   if (hydrated?.raw !== undefined) return JSON.stringify(hydrated.raw, null, 2);
   return hydrated?.title || event.title || "";
