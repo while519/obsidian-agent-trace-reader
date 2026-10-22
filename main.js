@@ -1206,14 +1206,68 @@ var require_trace_model = __commonJS({
   }
 });
 
+// src/trace-copy.js
+var require_trace_copy = __commonJS({
+  "src/trace-copy.js"(exports2, module2) {
+    "use strict";
+    function payloadOf(event) {
+      const raw = event?.raw;
+      if (!raw || typeof raw !== "object") return {};
+      const payload = raw.payload && typeof raw.payload === "object" ? raw.payload : {};
+      const item = payload.item && typeof payload.item === "object" ? payload.item : {};
+      return { ...item, ...payload };
+    }
+    function parseArguments(value) {
+      if (typeof value !== "string") return value;
+      try {
+        return JSON.parse(value);
+      } catch {
+        return value;
+      }
+    }
+    function shellQuote(value) {
+      const text = String(value);
+      if (text === "") return "''";
+      if (/^[A-Za-z0-9_./:=+-]+$/.test(text)) return text;
+      return "'" + text.replace(/'/g, "'\\''") + "'";
+    }
+    function commandText(event) {
+      if (!event || event.kind !== "tool-call") return void 0;
+      const payload = payloadOf(event);
+      const args = parseArguments(payload.arguments ?? payload.input ?? payload.params);
+      const command = args && typeof args === "object" && !Array.isArray(args) ? args.cmd ?? args.command ?? args.commands : void 0;
+      const direct = command ?? payload.command ?? payload.cmd ?? payload.commands;
+      if (typeof direct === "string") return direct;
+      if (Array.isArray(direct)) return direct.map(shellQuote).join(" ");
+      if (direct !== void 0 && direct !== null) return JSON.stringify(direct, null, 2);
+      if (typeof args === "string" && isCommandTool(event)) return args;
+      return void 0;
+    }
+    function isCommandTool(event) {
+      return event?.kind === "tool-call" && /(?:exec[_-]?command|run[_-]?command|shell|terminal|powershell|bash)/i.test(
+        String(event.title || event.sourceSubtype || "")
+      );
+    }
+    function copyLabelForEvent(event) {
+      if (event?.kind === "user" || event?.kind === "assistant") return "Copy message";
+      if (event?.kind === "tool-call") return isCommandTool(event) || commandText(event) !== void 0 ? "Copy command" : "Copy tool input";
+      if (event?.kind === "tool-result") return "Copy result";
+      if (event?.kind === "reasoning") return "Copy reasoning";
+      return "Copy content";
+    }
+    module2.exports = { commandText, isCommandTool, copyLabelForEvent };
+  }
+});
+
 // src/trace-explorer.js
 var require_trace_explorer = __commonJS({
   "src/trace-explorer.js"(exports2, module2) {
     "use strict";
-    var { MarkdownRenderer, setIcon } = require("obsidian");
+    var { MarkdownRenderer, Notice, setIcon } = require("obsidian");
     var { hydrateEvent } = require_codex();
     var { renderJsonTree } = require_json_explorer();
     var { projectTurns, pairCalls, timelineBounds, eventTimeline, durationText, eventLabel, searchEvents } = require_trace_model();
+    var { commandText, isCommandTool, copyLabelForEvent } = require_trace_copy();
     var BATCH = 120;
     function hasReadableContent(event) {
       const length = Number(event?.contentLength);
@@ -1277,6 +1331,21 @@ var require_trace_explorer = __commonJS({
           related.onclick = () => inspect(pair.call);
         }
         if (event.explicitError) meta.createSpan({ cls: "atr-explorer-warning", text: "Explicit error" });
+        const actions = head.createDiv({ cls: "atr-explorer-inspector-actions" });
+        if (event.kind === "tool-call") {
+          if (isCommandTool(event) || commandText(event) !== void 0) {
+            copyAction(actions, "Copy command", () => {
+              const hydrated = hydrateEvent(event);
+              return commandText(hydrated) ?? eventContentText(hydrated, event);
+            });
+          }
+          copyAction(actions, "Copy input", () => eventContentText(hydrateEvent(event), event));
+        } else if (event.kind === "tool-result") {
+          copyAction(actions, "Copy result", () => eventContentText(hydrateEvent(event), event));
+        } else if (event.hasContent || event.content !== void 0) {
+          copyAction(actions, copyLabelForEvent(event), () => eventContentText(hydrateEvent(event), event));
+        }
+        copyAction(actions, "Copy JSON", () => eventRawJson(event));
         const tabs = head.createDiv({ cls: "atr-explorer-inspector-tabs" });
         const body = inspector.createDiv({ cls: "atr-explorer-inspector-content" });
         const renderTab = (mode) => {
@@ -1334,6 +1403,7 @@ var require_trace_explorer = __commonJS({
             for (; cursor < end; cursor++) {
               const event = matching[cursor], pair = pairs.get(event.index);
               const row = list.createEl("button", { cls: "atr-explorer-row", attr: { type: "button" } });
+              row.setAttribute("data-atr-anchor", `event-${event.index}`);
               if (current === event) row.addClass("is-active");
               const line = row.createDiv({ cls: "atr-explorer-row-line" });
               line.createSpan({ cls: "atr-explorer-kind atr-explorer-kind-" + event.kind, text: event.kind });
@@ -1383,7 +1453,170 @@ var require_trace_explorer = __commonJS({
       inspect(current);
       drawList();
     }
+    function eventContentText(hydrated, event) {
+      if (hydrated?.content !== void 0) return hydrated.content;
+      if (hydrated?.raw !== void 0) return JSON.stringify(hydrated.raw, null, 2);
+      return hydrated?.title || event?.title || "";
+    }
+    function eventRawJson(event) {
+      const hydrated = hydrateEvent(event);
+      return JSON.stringify(hydrated?.raw === void 0 ? hydrated : hydrated.raw, null, 2);
+    }
+    function copyAction(parent, label, getText) {
+      const button = parent.createEl("button", {
+        cls: "atr-explorer-copy-action",
+        attr: { type: "button", title: label, "aria-label": label }
+      });
+      setIcon(button, "copy");
+      button.createSpan({ text: label });
+      button.addEventListener("click", async (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        try {
+          const value = await getText();
+          if (value === void 0 || value === null || String(value).length === 0) {
+            throw new Error("Nothing to copy");
+          }
+          const text = String(value);
+          if (typeof navigator !== "undefined" && navigator.clipboard?.writeText) {
+            try {
+              await navigator.clipboard.writeText(text);
+            } catch {
+              copyFallback(text);
+            }
+          } else copyFallback(text);
+          button.addClass("is-copied");
+          setTimeout(() => button.removeClass("is-copied"), 1200);
+          new Notice(label + " copied");
+        } catch (error) {
+          new Notice("Could not copy: " + error.message);
+        }
+      });
+      return button;
+    }
+    function copyFallback(value) {
+      if (typeof document === "undefined" || !document.body) throw new Error("Clipboard unavailable");
+      const textarea = document.createElement("textarea");
+      textarea.value = value;
+      textarea.setAttribute("readonly", "");
+      textarea.style.position = "fixed";
+      textarea.style.opacity = "0";
+      document.body.appendChild(textarea);
+      textarea.select();
+      try {
+        if (!document.execCommand("copy")) throw new Error("Clipboard unavailable");
+      } finally {
+        textarea.remove();
+      }
+    }
     module2.exports = { renderTraceExplorer };
+  }
+});
+
+// src/trace-viewport.js
+var require_trace_viewport = __commonJS({
+  "src/trace-viewport.js"(exports2, module2) {
+    "use strict";
+    function findScrollContainer(root) {
+      let node = root;
+      while (node) {
+        const size = Number(node.scrollHeight) - Number(node.clientHeight);
+        if (size > 1 && Number(node.clientHeight) > 0) {
+          const overflow = typeof getComputedStyle === "function" ? getComputedStyle(node).overflowY : "auto";
+          if (/auto|scroll|overlay/.test(overflow)) return node;
+        }
+        node = node.parentElement;
+      }
+      return root.closest?.(".view-content") || root;
+    }
+    function findAnchor(root, id) {
+      if (!id) return null;
+      for (const el of root.querySelectorAll("[data-atr-anchor]")) {
+        if (el.getAttribute("data-atr-anchor") === id) return el;
+      }
+      return null;
+    }
+    function captureViewport(root) {
+      const scroll = findScrollContainer(root);
+      const frame = scroll.getBoundingClientRect();
+      const toolbar = root.querySelector(".atr-trace-toolbar");
+      const toolbarHeight = toolbar?.getBoundingClientRect().height || 0;
+      const threshold = frame.top + toolbarHeight + 8;
+      let chosen = null;
+      let distance = Infinity;
+      for (const el of root.querySelectorAll("[data-atr-anchor]")) {
+        const rect = el.getBoundingClientRect();
+        if (rect.bottom < threshold || rect.top > frame.bottom) continue;
+        const diff = Math.abs(rect.top - threshold);
+        if (diff < distance) {
+          chosen = { id: el.getAttribute("data-atr-anchor"), offset: rect.top - frame.top };
+          distance = diff;
+        }
+      }
+      const internalScroll = [".atr-explorer-tree", ".atr-explorer-inspector-content"].flatMap((selector) => Array.from(root.querySelectorAll(selector)).map((element, index) => ({
+        selector,
+        index,
+        scrollTop: element.scrollTop,
+        scrollLeft: element.scrollLeft
+      })));
+      return {
+        scroll,
+        scrollTop: scroll.scrollTop,
+        scrollLeft: scroll.scrollLeft,
+        anchor: chosen,
+        internalScroll
+      };
+    }
+    function restoreViewport(root, snapshot) {
+      if (!snapshot?.scroll) return;
+      const scroll = snapshot.scroll;
+      scroll.scrollTop = snapshot.scrollTop;
+      scroll.scrollLeft = snapshot.scrollLeft;
+      const element = findAnchor(root, snapshot.anchor?.id);
+      if (element) {
+        const next = element.getBoundingClientRect().top;
+        const expected = scroll.getBoundingClientRect().top + snapshot.anchor.offset;
+        scroll.scrollTop += next - expected;
+      }
+      for (const item of snapshot.internalScroll || []) {
+        const current = root.querySelectorAll(item.selector)[item.index];
+        if (!current) continue;
+        current.scrollTop = item.scrollTop;
+        current.scrollLeft = item.scrollLeft;
+      }
+    }
+    function readingScrollers(root) {
+      const scroll = findScrollContainer(root);
+      const result = [scroll];
+      for (const selector of [".atr-explorer-tree", ".atr-explorer-inspector-content"]) {
+        const panel = root.querySelector?.(selector);
+        if (panel) result.push(panel);
+      }
+      return [...new Set(result)];
+    }
+    function nearBottom(scroll, tolerance = 96) {
+      if (!scroll || !Number.isFinite(Number(scroll.scrollHeight)) || !Number.isFinite(Number(scroll.clientHeight))) return false;
+      return scroll.scrollHeight - scroll.clientHeight - scroll.scrollTop <= tolerance;
+    }
+    function isNearLiveEdge(root, tolerance = 96) {
+      const query = root.querySelector?.(".atr-explorer-search");
+      const filter = root.querySelector?.(".atr-explorer-filter");
+      if (query?.value?.trim() || filter && filter.value !== "all") return false;
+      return readingScrollers(root).every((node) => nearBottom(node, tolerance));
+    }
+    function scrollToLiveEdge(root) {
+      for (const scroll of readingScrollers(root)) {
+        scroll.scrollTop = Math.max(0, scroll.scrollHeight - scroll.clientHeight);
+      }
+    }
+    module2.exports = {
+      findScrollContainer,
+      captureViewport,
+      restoreViewport,
+      readingScrollers,
+      isNearLiveEdge,
+      scrollToLiveEdge
+    };
   }
 });
 
@@ -1403,6 +1636,8 @@ var require_views = __commonJS({
     var source = require_codex();
     var { JsonView: JsonView2, renderJsonTree } = require_json_explorer();
     var { renderTraceExplorer } = require_trace_explorer();
+    var { captureViewport, restoreViewport, readingScrollers, isNearLiveEdge, scrollToLiveEdge } = require_trace_viewport();
+    var { commandText, isCommandTool, copyLabelForEvent } = require_trace_copy();
     var {
       VS: VS2,
       VT: VT2,
@@ -1603,6 +1838,13 @@ var require_views = __commonJS({
         this.fileWatcher = null;
         this.watchTimer = null;
         this.fileStamp = null;
+        this.renderedFilePath = "";
+        this.autoResumeTargets = [];
+        this.autoResumeHandler = () => {
+          if (this.autoFollow && this.changed && !this.loading && isNearLiveEdge(this.contentEl)) {
+            this.load({ auto: true });
+          }
+        };
       }
       getViewType() {
         return VT2;
@@ -1615,7 +1857,12 @@ var require_views = __commonJS({
       }
       async setState(state, result) {
         await super.setState(state, result);
-        if (this.filePath && state?.filePath !== this.filePath) this.stopWatching();
+        if (this.filePath && state?.filePath !== this.filePath) {
+          this.unbindAutoResume();
+          this.stopWatching();
+          this.trace = null;
+          this.renderedFilePath = "";
+        }
         this.filePath = state && typeof state.filePath === "string" ? state.filePath : "";
         await this.load();
       }
@@ -1626,32 +1873,87 @@ var require_views = __commonJS({
         if (this.filePath) await this.load();
       }
       async onClose() {
+        this.unbindAutoResume();
         this.stopWatching();
       }
-      async load() {
+      async load(options = {}) {
         const serial = ++this.loadSerial;
+        const filePath = this.filePath;
+        const hasExistingView = Boolean(this.trace && this.renderedFilePath === filePath);
         this.loading = true;
-        this.contentEl.empty();
-        this.contentEl.addClass("atr-trace");
-        this.contentEl.createDiv({ cls: "atr-loading", text: "Loading trace\u2026" });
+        if (hasExistingView) {
+          this.updateRefreshState();
+        } else {
+          this.contentEl.empty();
+          this.contentEl.addClass("atr-trace");
+          this.contentEl.createDiv({ cls: "atr-loading", text: "Loading trace\u2026" });
+        }
         try {
-          const trace = await parseTraceFile(this.filePath);
+          const trace = await parseTraceFile(filePath);
           if (serial !== this.loadSerial) return;
+          if (options.auto && hasExistingView && !isNearLiveEdge(this.contentEl)) {
+            this.loading = false;
+            this.changed = true;
+            this.updateRefreshState();
+            this.updateChangeIndicator();
+            return;
+          }
+          const viewport = hasExistingView ? captureViewport(this.contentEl) : null;
+          const followLatest = options.auto && hasExistingView && isNearLiveEdge(this.contentEl);
           this.trace = trace;
+          this.renderedFilePath = filePath;
           this.loading = false;
           this.changed = false;
           this.render();
+          if (followLatest) scrollToLiveEdge(this.contentEl);
+          else if (viewport) restoreViewport(this.contentEl, viewport);
           this.startWatching();
         } catch (error) {
           if (serial !== this.loadSerial) return;
           this.loading = false;
-          this.trace = null;
-          this.contentEl.empty();
-          this.contentEl.addClass("atr-trace");
-          this.contentEl.createDiv({ cls: "atr-error", text: `Could not read trace: ${err(error)}` });
+          if (hasExistingView) {
+            this.updateRefreshState();
+            new Notice(`Could not refresh trace: ${err(error)}`);
+          } else {
+            this.trace = null;
+            this.renderedFilePath = "";
+            this.contentEl.empty();
+            this.contentEl.addClass("atr-trace");
+            this.contentEl.createDiv({ cls: "atr-error", text: `Could not read trace: ${err(error)}` });
+          }
         }
       }
+      updateChangeIndicator() {
+        const indicator = this.contentEl.querySelector(".atr-trace-pending");
+        if (!indicator) return;
+        const pending = this.changed && this.autoFollow && !isNearLiveEdge(this.contentEl);
+        indicator.toggleClass("is-visible", pending);
+        indicator.textContent = pending ? "New records \xB7 Auto paused while reading" : "";
+      }
+      bindAutoResume() {
+        this.unbindAutoResume();
+        this.autoResumeTargets = readingScrollers(this.contentEl);
+        for (const target of this.autoResumeTargets) {
+          target.addEventListener?.("scroll", this.autoResumeHandler, { passive: true });
+        }
+      }
+      unbindAutoResume() {
+        for (const target of this.autoResumeTargets) {
+          target.removeEventListener?.("scroll", this.autoResumeHandler);
+        }
+        this.autoResumeTargets = [];
+      }
+      updateRefreshState() {
+        const refresh = this.contentEl.querySelector(".atr-trace-refresh");
+        if (!refresh) return;
+        refresh.disabled = this.loading;
+        refresh.toggleClass("is-loading", this.loading);
+        refresh.setAttribute("aria-busy", String(this.loading));
+        const label = refresh.querySelector(".atr-refresh-label");
+        if (label) label.textContent = this.loading ? "Refreshing\u2026" : "Refresh";
+      }
       render() {
+        this.unbindAutoResume();
         const rootEl = this.contentEl;
         rootEl.empty();
         rootEl.addClass("atr-trace");
@@ -1666,21 +1968,8 @@ var require_views = __commonJS({
         meta.createSpan({ text: `${trace.lineCount.toLocaleString()} lines` });
         if (trace.isLarge) meta.createSpan({ text: `${formatBytes(trace.fileSize)} \xB7 streamed` });
         copyButton(meta, "Copy trace path", () => this.filePath);
-        const controls = header.createDiv({ cls: "atr-trace-controls" });
-        const refresh = btn(controls, "refresh-cw", "Refresh trace");
-        refresh.disabled = this.loading;
-        refresh.onclick = () => this.load();
-        const follow = btn(controls, "radio", "Auto-follow trace");
-        follow.addClass("atr-follow-toggle");
-        follow.createSpan({ text: "Auto" });
-        follow.toggleClass("is-active", this.autoFollow);
-        follow.onclick = () => {
-          this.autoFollow = !this.autoFollow;
-          const refreshNow = this.autoFollow && this.changed;
-          this.render();
-          if (refreshNow) this.load();
-        };
-        const tabs = controls.createDiv({ cls: "atr-tabs" });
+        const toolbar = rootEl.createDiv({ cls: "atr-trace-toolbar" });
+        const tabs = toolbar.createDiv({ cls: "atr-tabs" });
         for (const tab of ["conversation", "explorer", "trajectory", "raw"]) {
           const tabEl = tabs.createEl("button", {
             cls: `atr-tab${this.tab === tab ? " is-active" : ""}`,
@@ -1691,6 +1980,28 @@ var require_views = __commonJS({
             this.render();
           };
         }
+        const controls = toolbar.createDiv({ cls: "atr-trace-controls" });
+        const follow = btn(controls, "radio", "Auto-follow trace");
+        follow.addClass("atr-follow-toggle");
+        follow.createSpan({ text: "Auto" });
+        follow.toggleClass("is-active", this.autoFollow);
+        follow.onclick = () => {
+          this.autoFollow = !this.autoFollow;
+          follow.toggleClass("is-active", this.autoFollow);
+          follow.setAttribute("aria-pressed", String(this.autoFollow));
+          this.updateChangeIndicator();
+          if (this.autoFollow && this.changed && !this.loading && isNearLiveEdge(this.contentEl)) {
+            this.load({ auto: true });
+          }
+        };
+        follow.setAttribute("aria-pressed", String(this.autoFollow));
+        const refresh = btn(controls, "refresh-cw", "Refresh trace");
+        refresh.addClass("atr-trace-refresh");
+        refresh.createSpan({ cls: "atr-refresh-label", text: "Refresh" });
+        refresh.onclick = () => this.load();
+        const pending = controls.createSpan({ cls: "atr-trace-pending", text: "" });
+        pending.setAttribute("aria-live", "polite");
+        this.updateRefreshState();
         if (trace.errors.length) {
           rootEl.createDiv({
             cls: "atr-warning",
@@ -1711,6 +2022,8 @@ var require_views = __commonJS({
         else if (this.tab === "explorer") renderTraceExplorer(body, trace, this);
         else if (this.tab === "trajectory") this.traj(body, trace.events);
         else rawView(body, trace);
+        this.bindAutoResume();
+        this.updateChangeIndicator();
       }
       convo(parent, events) {
         const use = conversationEvents(events);
@@ -1789,8 +2102,12 @@ var require_views = __commonJS({
           if (!next || sameStamp(next, this.fileStamp)) return;
           this.fileStamp = next;
           this.changed = true;
-          if (this.autoFollow && !this.loading) this.load();
-          else if (!this.loading && this.trace) this.showChangedNotice();
+          if (this.autoFollow) {
+            if (!this.loading && isNearLiveEdge(this.contentEl)) this.load({ auto: true });
+            else this.updateChangeIndicator();
+          } else if (!this.loading && this.trace) {
+            this.showChangedNotice();
+          }
         }, 180);
       }
       showChangedNotice() {
@@ -1805,6 +2122,7 @@ var require_views = __commonJS({
     };
     function processBlock(parent, events, comp, compact) {
       const details = parent.createEl("details", { cls: "atr-process" });
+      if (events.length) details.setAttribute("data-atr-anchor", `process-${events[0].index}`);
       if (!compact) details.open = true;
       const summary = details.createEl("summary");
       summary.createSpan({
@@ -1840,11 +2158,27 @@ var require_views = __commonJS({
     }
     function card(parent, event, comp) {
       const cardEl = parent.createDiv({ cls: `atr-message atr-message-${event.kind}` });
+      cardEl.setAttribute("data-atr-anchor", `event-${event.index}`);
       const header = cardEl.createDiv({ cls: "atr-message-header" });
       const headerMain = header.createDiv({ cls: "atr-message-header-main" });
       headerMain.createSpan({ cls: "atr-message-role", text: (event.role || event.kind).toUpperCase() });
       if (event.timestamp) headerMain.createSpan({ cls: "atr-message-time", text: time(event.timestamp) });
-      copyButton(header, "Copy message", () => eventCopyText(event));
+      const copyActions = header.createDiv({ cls: "atr-message-copy-actions" });
+      if (event.kind === "tool-call") {
+        const hasCommand = isCommandTool(event) || commandText(event) !== void 0;
+        if (hasCommand) {
+          copyButton(copyActions, "Copy tool command", () => {
+            const hydrated = hydrateEvent(event);
+            return commandText(hydrated) ?? eventInputTextFromHydrated(hydrated, event);
+          }, { text: "Command" });
+        }
+        copyButton(copyActions, "Copy tool input", () => eventInputText(event), { text: "Input" });
+      } else {
+        const label = copyLabelForEvent(event);
+        copyButton(copyActions, label, () => eventCopyText(event), {
+          text: event.kind === "tool-result" ? "Copy result" : "Copy"
+        });
+      }
       if (event.content !== void 0) {
         const body = cardEl.createDiv({ cls: "atr-message-body" });
         messageBody(body, event.content, comp);
@@ -1888,13 +2222,14 @@ var require_views = __commonJS({
     }
     function eventRow(parent, event, comp) {
       const details = parent.createEl("details", { cls: `atr-trajectory-row atr-kind-${event.kind}` });
+      details.setAttribute("data-atr-anchor", `event-${event.index}`);
       const summary = details.createEl("summary");
       summary.createSpan({ cls: "atr-event-index", text: String(event.index + 1).padStart(3, "0") });
       summary.createSpan({ cls: "atr-event-time", text: event.timestamp ? time(event.timestamp) : "\u2014" });
       summary.createSpan({ cls: "atr-event-kind", text: event.kind });
       const title = event.hasContent && event.content === void 0 ? `${event.title} \xB7 ${formatChars(event.contentLength)}` : event.title;
       summary.createSpan({ cls: "atr-event-title", text: title });
-      const copy = copyButton(summary, "Copy event", () => eventCopyText(event));
+      const copy = copyButton(summary, copyLabelForEvent(event), () => eventCopyText(event), { text: "Copy" });
       copy.addClass("atr-event-copy");
       const content = details.createDiv({ cls: "atr-event-details" });
       let loaded = false;
@@ -1954,7 +2289,7 @@ var require_views = __commonJS({
           render(mode);
         };
       }
-      copyButton(bar, "Copy string", () => value);
+      copyButton(bar, "Copy full content", () => value, { text: "Copy content" });
       details.addEventListener("toggle", () => {
         if (details.open && !rendered) render(active);
       });
@@ -1988,6 +2323,7 @@ var require_views = __commonJS({
           const line = trace.raw !== void 0 ? rawLines[cursor] || "" : readLineRef(trace.lineRefs[cursor]);
           loadedLines.push(line);
           const lineEl = pre.createDiv({ cls: "atr-raw-line" });
+          lineEl.setAttribute("data-atr-anchor", `line-${cursor + 1}`);
           lineEl.createSpan({ cls: "atr-line-number", text: String(cursor + 1) });
           lineEl.createSpan({ cls: "atr-line-content", text: line });
         }
@@ -2065,6 +2401,16 @@ var require_views = __commonJS({
       return eventCopyTextFromHydrated(hydrateEvent(event), event);
     }
     function eventCopyTextFromHydrated(hydrated, event) {
+      if (event?.kind === "tool-call") {
+        const command = commandText(hydrated || event);
+        if (command !== void 0) return command;
+      }
+      return eventInputTextFromHydrated(hydrated, event);
+    }
+    function eventInputText(event) {
+      return eventInputTextFromHydrated(hydrateEvent(event), event);
+    }
+    function eventInputTextFromHydrated(hydrated, event) {
       if (hydrated?.content !== void 0) return hydrated.content;
       if (hydrated?.raw !== void 0) return JSON.stringify(hydrated.raw, null, 2);
       return hydrated?.title || event.title || "";

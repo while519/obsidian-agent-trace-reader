@@ -277,6 +277,63 @@
   gap: 4px;
 }
 
+.atr-trace-toolbar {
+  position: sticky;
+  top: 0;
+  z-index: 8;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 7px 9px;
+  margin: 0 0 14px;
+  background: var(--background-primary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 7px;
+  box-shadow: var(--shadow-s);
+}
+
+.atr-trace-toolbar .atr-tabs {
+  min-width: 0;
+  overflow-x: auto;
+}
+
+.atr-trace-pending {
+  display: none;
+  color: var(--text-warning);
+  font-size: .76em;
+  max-width: 220px;
+  line-height: 1.2;
+}
+
+.atr-trace-pending.is-visible {
+  display: inline;
+}
+
+.atr-trace-refresh {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 9px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 5px;
+  background: var(--background-secondary);
+  color: var(--text-normal);
+  white-space: nowrap;
+}
+
+.atr-trace-refresh:hover {
+  background: var(--background-modifier-hover);
+}
+
+.atr-trace-refresh.is-loading svg {
+  animation: atr-refresh-rotate 1.1s linear infinite;
+}
+
+@keyframes atr-refresh-rotate {
+  to { transform: rotate(360deg); }
+}
+
 .atr-trace-controls {
   align-items: center;
   display: flex;
@@ -363,6 +420,27 @@
   padding: 7px 10px;
   border-bottom: 1px solid var(--atr-border);
   font-size: 0.78em;
+}
+
+.atr-message-copy-actions {
+  align-items: center;
+  display: inline-flex;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.atr-message-copy-actions .atr-copy-button {
+  border: 1px solid var(--background-modifier-border);
+  background: var(--background-secondary);
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.atr-message-copy-actions .atr-copy-button:hover,
+.atr-message-copy-actions .atr-copy-button:focus-visible {
+  color: var(--text-normal);
+  border-color: var(--interactive-accent);
 }
 
 .atr-message-header-main {
@@ -468,7 +546,7 @@
 
 .atr-trajectory-row > summary {
   display: grid;
-  grid-template-columns: 42px 82px 100px minmax(0, 1fr) 32px;
+  grid-template-columns: 42px 82px 100px minmax(0, 1fr) 68px;
   gap: 8px;
   align-items: center;
   min-height: 38px;
@@ -602,6 +680,21 @@
 }
 
 @media (max-width: 760px) {
+  .atr-trace-toolbar {
+    flex-wrap: wrap;
+    gap: 6px;
+    padding: 6px;
+  }
+
+  .atr-trace-toolbar .atr-tabs {
+    flex: 1 1 100%;
+    order: 2;
+  }
+
+  .atr-trace-toolbar .atr-trace-controls {
+    margin-left: auto;
+  }
+
   .atr-header,
   .atr-trace-header {
     flex-direction: column;
@@ -618,7 +711,7 @@
   }
 
   .atr-trajectory-row > summary {
-    grid-template-columns: 32px 64px 70px minmax(0, 1fr) 30px;
+    grid-template-columns: 32px 64px 70px minmax(0, 1fr) 54px;
   }
 
   .atr-event-details {
@@ -660,6 +753,11 @@
 .atr-explorer-inspector { border:1px solid var(--background-modifier-border);border-radius:10px;min-width:0;min-height:420px;overflow:auto;background:var(--background-primary); }
 .atr-explorer-inspector-head { padding:14px 16px;border-bottom:1px solid var(--background-modifier-border); }
 .atr-explorer-inspector-head h3 { margin:0 0 8px;font-size:1.08em;overflow-wrap:anywhere; }
+.atr-explorer-inspector-actions { display:flex;gap:7px;flex-wrap:wrap;margin-top:12px; }
+.atr-explorer-copy-action { display:inline-flex;align-items:center;justify-content:center;gap:6px;border:1px solid var(--background-modifier-border);border-radius:6px;background:var(--background-secondary);color:var(--text-muted);font-size:.8em;padding:6px 9px;white-space:nowrap; }
+.atr-explorer-copy-action svg { width:13px;height:13px; }
+.atr-explorer-copy-action:hover,.atr-explorer-copy-action:focus-visible { background:var(--background-modifier-hover);color:var(--text-normal);border-color:var(--interactive-accent); }
+.atr-explorer-copy-action.is-copied { color:var(--text-success); }
 .atr-explorer-inspector-meta { display:flex;gap:8px;align-items:center;flex-wrap:wrap;color:var(--text-muted);font-family:var(--font-monospace);font-size:.75em; }
 .atr-explorer-inspector-tabs { display:flex;gap:6px;flex-wrap:wrap;margin-top:14px; }
 .atr-explorer-tab { border:0;border-radius:6px;background:transparent;color:var(--text-muted);padding:6px 11px; }
