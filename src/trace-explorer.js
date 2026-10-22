@@ -1,8 +1,9 @@
 "use strict";
-const { MarkdownRenderer, setIcon } = require("obsidian");
+const { MarkdownRenderer, Notice, setIcon } = require("obsidian");
 const { hydrateEvent } = require("./sources/codex");
 const { renderJsonTree } = require("./json-explorer");
 const { projectTurns, pairCalls, timelineBounds, eventTimeline, durationText, eventLabel, searchEvents } = require("./trace-model");
+const { commandText, isCommandTool, copyLabelForEvent } = require("./trace-copy");
 
 const BATCH = 120;
 
@@ -69,6 +70,24 @@ function renderTraceExplorer(parent, trace, view) {
       related.onclick = () => inspect(pair.call);
     }
     if (event.explicitError) meta.createSpan({ cls: "atr-explorer-warning", text: "Explicit error" });
+
+    // Keep exact-copy actions visible beside the selected event, independent of the active tab.
+    const actions = head.createDiv({ cls: "atr-explorer-inspector-actions" });
+    if (event.kind === "tool-call") {
+      if (isCommandTool(event) || commandText(event) !== undefined) {
+        copyAction(actions, "Copy command", () => {
+          const hydrated = hydrateEvent(event);
+          return commandText(hydrated) ?? eventContentText(hydrated, event);
+        });
+      }
+      copyAction(actions, "Copy input", () => eventContentText(hydrateEvent(event), event));
+    } else if (event.kind === "tool-result") {
+      copyAction(actions, "Copy result", () => eventContentText(hydrateEvent(event), event));
+    } else if (event.hasContent || event.content !== undefined) {
+      copyAction(actions, copyLabelForEvent(event), () => eventContentText(hydrateEvent(event), event));
+    }
+    copyAction(actions, "Copy JSON", () => eventRawJson(event));
+
     const tabs = head.createDiv({ cls: "atr-explorer-inspector-tabs" });
     const body = inspector.createDiv({ cls: "atr-explorer-inspector-content" });
     const renderTab = (mode) => {
@@ -176,4 +195,62 @@ function renderTraceExplorer(parent, trace, view) {
   inspect(current);
   drawList();
 }
+
+function eventContentText(hydrated, event) {
+  if (hydrated?.content !== undefined) return hydrated.content;
+  if (hydrated?.raw !== undefined) return JSON.stringify(hydrated.raw, null, 2);
+  return hydrated?.title || event?.title || "";
+}
+
+function eventRawJson(event) {
+  const hydrated = hydrateEvent(event);
+  return JSON.stringify(hydrated?.raw === undefined ? hydrated : hydrated.raw, null, 2);
+}
+
+function copyAction(parent, label, getText) {
+  const button = parent.createEl("button", {
+    cls: "atr-explorer-copy-action",
+    attr: { type: "button", title: label, "aria-label": label },
+  });
+  setIcon(button, "copy");
+  button.createSpan({ text: label });
+  button.addEventListener("click", async (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    try {
+      const value = await getText();
+      if (value === undefined || value === null || String(value).length === 0) {
+        throw new Error("Nothing to copy");
+      }
+      const text = String(value);
+      if (typeof navigator !== "undefined" && navigator.clipboard?.writeText) {
+        try { await navigator.clipboard.writeText(text); }
+        catch { copyFallback(text); }
+      } else copyFallback(text);
+      button.addClass("is-copied");
+      setTimeout(() => button.removeClass("is-copied"), 1200);
+      new Notice(label + " copied");
+    } catch (error) {
+      new Notice("Could not copy: " + error.message);
+    }
+  });
+  return button;
+}
+
+function copyFallback(value) {
+  if (typeof document === "undefined" || !document.body) throw new Error("Clipboard unavailable");
+  const textarea = document.createElement("textarea");
+  textarea.value = value;
+  textarea.setAttribute("readonly", "");
+  textarea.style.position = "fixed";
+  textarea.style.opacity = "0";
+  document.body.appendChild(textarea);
+  textarea.select();
+  try {
+    if (!document.execCommand("copy")) throw new Error("Clipboard unavailable");
+  } finally {
+    textarea.remove();
+  }
+}
+
 module.exports = { renderTraceExplorer };
