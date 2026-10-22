@@ -1206,14 +1206,68 @@ var require_trace_model = __commonJS({
   }
 });
 
+// src/trace-copy.js
+var require_trace_copy = __commonJS({
+  "src/trace-copy.js"(exports2, module2) {
+    "use strict";
+    function payloadOf(event) {
+      const raw = event?.raw;
+      if (!raw || typeof raw !== "object") return {};
+      const payload = raw.payload && typeof raw.payload === "object" ? raw.payload : {};
+      const item = payload.item && typeof payload.item === "object" ? payload.item : {};
+      return { ...item, ...payload };
+    }
+    function parseArguments(value) {
+      if (typeof value !== "string") return value;
+      try {
+        return JSON.parse(value);
+      } catch {
+        return value;
+      }
+    }
+    function shellQuote(value) {
+      const text = String(value);
+      if (text === "") return "''";
+      if (/^[A-Za-z0-9_./:=+-]+$/.test(text)) return text;
+      return "'" + text.replace(/'/g, "'\\''") + "'";
+    }
+    function commandText(event) {
+      if (!event || event.kind !== "tool-call") return void 0;
+      const payload = payloadOf(event);
+      const args = parseArguments(payload.arguments ?? payload.input ?? payload.params);
+      const command = args && typeof args === "object" && !Array.isArray(args) ? args.cmd ?? args.command ?? args.commands : void 0;
+      const direct = command ?? payload.command ?? payload.cmd ?? payload.commands;
+      if (typeof direct === "string") return direct;
+      if (Array.isArray(direct)) return direct.map(shellQuote).join(" ");
+      if (direct !== void 0 && direct !== null) return JSON.stringify(direct, null, 2);
+      if (typeof args === "string" && isCommandTool(event)) return args;
+      return void 0;
+    }
+    function isCommandTool(event) {
+      return event?.kind === "tool-call" && /(?:exec[_-]?command|run[_-]?command|shell|terminal|powershell|bash)/i.test(
+        String(event.title || event.sourceSubtype || "")
+      );
+    }
+    function copyLabelForEvent(event) {
+      if (event?.kind === "user" || event?.kind === "assistant") return "Copy message";
+      if (event?.kind === "tool-call") return isCommandTool(event) || commandText(event) !== void 0 ? "Copy command" : "Copy tool input";
+      if (event?.kind === "tool-result") return "Copy result";
+      if (event?.kind === "reasoning") return "Copy reasoning";
+      return "Copy content";
+    }
+    module2.exports = { commandText, isCommandTool, copyLabelForEvent };
+  }
+});
+
 // src/trace-explorer.js
 var require_trace_explorer = __commonJS({
   "src/trace-explorer.js"(exports2, module2) {
     "use strict";
-    var { MarkdownRenderer, setIcon } = require("obsidian");
+    var { MarkdownRenderer, Notice, setIcon } = require("obsidian");
     var { hydrateEvent } = require_codex();
     var { renderJsonTree } = require_json_explorer();
     var { projectTurns, pairCalls, timelineBounds, eventTimeline, durationText, eventLabel, searchEvents } = require_trace_model();
+    var { commandText, isCommandTool, copyLabelForEvent } = require_trace_copy();
     var BATCH = 120;
     function hasReadableContent(event) {
       const length = Number(event?.contentLength);
@@ -1277,6 +1331,21 @@ var require_trace_explorer = __commonJS({
           related.onclick = () => inspect(pair.call);
         }
         if (event.explicitError) meta.createSpan({ cls: "atr-explorer-warning", text: "Explicit error" });
+        const actions = head.createDiv({ cls: "atr-explorer-inspector-actions" });
+        if (event.kind === "tool-call") {
+          if (isCommandTool(event) || commandText(event) !== void 0) {
+            copyAction(actions, "Copy command", () => {
+              const hydrated = hydrateEvent(event);
+              return commandText(hydrated) ?? eventContentText(hydrated, event);
+            });
+          }
+          copyAction(actions, "Copy input", () => eventContentText(hydrateEvent(event), event));
+        } else if (event.kind === "tool-result") {
+          copyAction(actions, "Copy result", () => eventContentText(hydrateEvent(event), event));
+        } else if (event.hasContent || event.content !== void 0) {
+          copyAction(actions, copyLabelForEvent(event), () => eventContentText(hydrateEvent(event), event));
+        }
+        copyAction(actions, "Copy JSON", () => eventRawJson(event));
         const tabs = head.createDiv({ cls: "atr-explorer-inspector-tabs" });
         const body = inspector.createDiv({ cls: "atr-explorer-inspector-content" });
         const renderTab = (mode) => {
@@ -1383,6 +1452,62 @@ var require_trace_explorer = __commonJS({
       includeEmpty.onchange = drawList;
       inspect(current);
       drawList();
+    }
+    function eventContentText(hydrated, event) {
+      if (hydrated?.content !== void 0) return hydrated.content;
+      if (hydrated?.raw !== void 0) return JSON.stringify(hydrated.raw, null, 2);
+      return hydrated?.title || event?.title || "";
+    }
+    function eventRawJson(event) {
+      const hydrated = hydrateEvent(event);
+      return JSON.stringify(hydrated?.raw === void 0 ? hydrated : hydrated.raw, null, 2);
+    }
+    function copyAction(parent, label, getText) {
+      const button = parent.createEl("button", {
+        cls: "atr-explorer-copy-action",
+        attr: { type: "button", title: label, "aria-label": label }
+      });
+      setIcon(button, "copy");
+      button.createSpan({ text: label });
+      button.addEventListener("click", async (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        try {
+          const value = await getText();
+          if (value === void 0 || value === null || String(value).length === 0) {
+            throw new Error("Nothing to copy");
+          }
+          const text = String(value);
+          if (typeof navigator !== "undefined" && navigator.clipboard?.writeText) {
+            try {
+              await navigator.clipboard.writeText(text);
+            } catch {
+              copyFallback(text);
+            }
+          } else copyFallback(text);
+          button.addClass("is-copied");
+          setTimeout(() => button.removeClass("is-copied"), 1200);
+          new Notice(label + " copied");
+        } catch (error) {
+          new Notice("Could not copy: " + error.message);
+        }
+      });
+      return button;
+    }
+    function copyFallback(value) {
+      if (typeof document === "undefined" || !document.body) throw new Error("Clipboard unavailable");
+      const textarea = document.createElement("textarea");
+      textarea.value = value;
+      textarea.setAttribute("readonly", "");
+      textarea.style.position = "fixed";
+      textarea.style.opacity = "0";
+      document.body.appendChild(textarea);
+      textarea.select();
+      try {
+        if (!document.execCommand("copy")) throw new Error("Clipboard unavailable");
+      } finally {
+        textarea.remove();
+      }
     }
     module2.exports = { renderTraceExplorer };
   }
@@ -1512,6 +1637,7 @@ var require_views = __commonJS({
     var { JsonView: JsonView2, renderJsonTree } = require_json_explorer();
     var { renderTraceExplorer } = require_trace_explorer();
     var { captureViewport, restoreViewport, readingScrollers, isNearLiveEdge, scrollToLiveEdge } = require_trace_viewport();
+    var { commandText, isCommandTool, copyLabelForEvent } = require_trace_copy();
     var {
       VS: VS2,
       VT: VT2,
@@ -2037,7 +2163,22 @@ var require_views = __commonJS({
       const headerMain = header.createDiv({ cls: "atr-message-header-main" });
       headerMain.createSpan({ cls: "atr-message-role", text: (event.role || event.kind).toUpperCase() });
       if (event.timestamp) headerMain.createSpan({ cls: "atr-message-time", text: time(event.timestamp) });
-      copyButton(header, "Copy message", () => eventCopyText(event));
+      const copyActions = header.createDiv({ cls: "atr-message-copy-actions" });
+      if (event.kind === "tool-call") {
+        const hasCommand = isCommandTool(event) || commandText(event) !== void 0;
+        if (hasCommand) {
+          copyButton(copyActions, "Copy tool command", () => {
+            const hydrated = hydrateEvent(event);
+            return commandText(hydrated) ?? eventInputTextFromHydrated(hydrated, event);
+          }, { text: "Command" });
+        }
+        copyButton(copyActions, "Copy tool input", () => eventInputText(event), { text: "Input" });
+      } else {
+        const label = copyLabelForEvent(event);
+        copyButton(copyActions, label, () => eventCopyText(event), {
+          text: event.kind === "tool-result" ? "Copy result" : "Copy"
+        });
+      }
       if (event.content !== void 0) {
         const body = cardEl.createDiv({ cls: "atr-message-body" });
         messageBody(body, event.content, comp);
@@ -2088,7 +2229,7 @@ var require_views = __commonJS({
       summary.createSpan({ cls: "atr-event-kind", text: event.kind });
       const title = event.hasContent && event.content === void 0 ? `${event.title} \xB7 ${formatChars(event.contentLength)}` : event.title;
       summary.createSpan({ cls: "atr-event-title", text: title });
-      const copy = copyButton(summary, "Copy event", () => eventCopyText(event));
+      const copy = copyButton(summary, copyLabelForEvent(event), () => eventCopyText(event), { text: "Copy" });
       copy.addClass("atr-event-copy");
       const content = details.createDiv({ cls: "atr-event-details" });
       let loaded = false;
@@ -2148,7 +2289,7 @@ var require_views = __commonJS({
           render(mode);
         };
       }
-      copyButton(bar, "Copy string", () => value);
+      copyButton(bar, "Copy full content", () => value, { text: "Copy content" });
       details.addEventListener("toggle", () => {
         if (details.open && !rendered) render(active);
       });
@@ -2260,6 +2401,16 @@ var require_views = __commonJS({
       return eventCopyTextFromHydrated(hydrateEvent(event), event);
     }
     function eventCopyTextFromHydrated(hydrated, event) {
+      if (event?.kind === "tool-call") {
+        const command = commandText(hydrated || event);
+        if (command !== void 0) return command;
+      }
+      return eventInputTextFromHydrated(hydrated, event);
+    }
+    function eventInputText(event) {
+      return eventInputTextFromHydrated(hydrateEvent(event), event);
+    }
+    function eventInputTextFromHydrated(hydrated, event) {
       if (hydrated?.content !== void 0) return hydrated.content;
       if (hydrated?.raw !== void 0) return JSON.stringify(hydrated.raw, null, 2);
       return hydrated?.title || event.title || "";
