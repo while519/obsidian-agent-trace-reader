@@ -608,18 +608,19 @@ function card(parent, event, comp) {
   const headerMain = header.createDiv({ cls: "atr-message-header-main" });
   headerMain.createSpan({ cls: "atr-message-role", text: (event.role || event.kind).toUpperCase() });
   if (event.timestamp) headerMain.createSpan({ cls: "atr-message-time", text: time(event.timestamp) });
+  const copyActions = header.createDiv({ cls: "atr-message-copy-actions" });
   if (event.kind === "tool-call") {
     const hasCommand = isCommandTool(event) || commandText(event) !== undefined;
     if (hasCommand) {
-      copyButton(header, "Copy tool command", () => {
+      copyButton(copyActions, "Copy tool command", () => {
         const hydrated = hydrateEvent(event);
         return commandText(hydrated) ?? eventInputTextFromHydrated(hydrated, event);
       }, { text: "Command" });
     }
-    copyButton(header, "Copy tool input", () => eventInputText(event), { text: "Input" });
+    copyButton(copyActions, "Copy tool input", () => eventInputText(event), { text: "Input" });
   } else {
     const label = copyLabelForEvent(event);
-    copyButton(header, label, () => eventCopyText(event), {
+    copyButton(copyActions, label, () => eventCopyText(event), {
       text: event.kind === "tool-result" ? "Copy result" : "Copy",
     });
   }
@@ -680,7 +681,7 @@ function eventRow(parent, event, comp) {
     ? `${event.title} · ${formatChars(event.contentLength)}`
     : event.title;
   summary.createSpan({ cls: "atr-event-title", text: title });
-  const copy = copyButton(summary, copyLabelForEvent(event), () => eventCopyText(event));
+  const copy = copyButton(summary, copyLabelForEvent(event), () => eventCopyText(event), { text: "Copy" });
   copy.addClass("atr-event-copy");
   const content = details.createDiv({ cls: "atr-event-details" });
   let loaded = false;
